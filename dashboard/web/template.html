@@ -219,7 +219,7 @@ const DecayCurveChart = ({player, width=600, height=240}) => {
 
 // ── HISTOGRAM (decay coef distribution) ──────────────────────────────────────
 const Histogram = ({players, width=360, height=190}) => {
-  const m = {top:12,right:12,bottom:36,left:36};
+  const m = {top:12,right:12,bottom:50,left:48};
   const W = width-m.left-m.right, H = height-m.top-m.bottom;
   const vals = players.map(p=>p.decay_coef);
   const min=-0.0008, max=0.0005, bins=14;
@@ -244,8 +244,11 @@ const Histogram = ({players, width=360, height=190}) => {
           <text key={i} x={((v-min)/(max-min))*W} y={H+28} textAnchor="middle" fontSize="10" fill="#999" fontFamily="IBM Plex Mono">{v.toFixed(4)}</text>
         ))}
         {[0,Math.round(maxC/2),maxC].map((c,i)=>(
-          <text key={i} x={-4} y={yS(c)+4} textAnchor="end" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{c}</text>
+          <text key={i} x={-6} y={yS(c)+4} textAnchor="end" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{c}</text>
         ))}
+        {/* axis labels */}
+        <text x={W/2} y={H+44} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif">Decay coefficient (per second of shift age)</text>
+        <text x={-36} y={H/2} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif" transform={`rotate(-90,-36,${H/2})`}>Players</text>
       </g>
     </svg>
   );
@@ -253,48 +256,80 @@ const Histogram = ({players, width=360, height=190}) => {
 
 // ── SCATTER (Base RAPM vs Decay) ──────────────────────────────────────────────
 const ScatterPlot = ({players, onSelect, reg, width=360, height=190}) => {
-  const m = {top:12,right:12,bottom:36,left:44};
+  const [tip, setTip] = React.useState(null);
+  const m = {top:12,right:12,bottom:50,left:52};
   const W=width-m.left-m.right, H=height-m.top-m.bottom;
   const xs=players.map(p=>p.decay_coef), ys=players.map(p=>p.base_rapm);
   const xMin=Math.min(...xs)-0.00005, xMax=Math.max(...xs)+0.00005;
   const yMin=Math.min(...ys)-0.005, yMax=Math.max(...ys)+0.005;
   const xS=v=>((v-xMin)/(xMax-xMin))*W;
   const yS=v=>H-((v-yMin)/(yMax-yMin))*H;
-  // clip regression line y-values to chart bounds, then map to SVG
   const rl_y1 = reg.slope*xMin + reg.intercept;
   const rl_y2 = reg.slope*xMax + reg.intercept;
+
+  const handleMove = (e, p) => {
+    const rect = e.currentTarget.closest('svg').getBoundingClientRect();
+    setTip({p, x: e.clientX - rect.left, y: e.clientY - rect.top});
+  };
+
   return (
-    <svg width={width} height={height} style={{cursor:'crosshair'}}>
-      <g transform={`translate(${m.left},${m.top})`}>
-        <line x1={0} y1={yS(0)} x2={W} y2={yS(0)} stroke="#eee"/>
-        <line x1={xS(0)} y1={0} x2={xS(0)} y2={H} stroke="#ddd" strokeDasharray="4 2"/>
-        {/* OLS trend line */}
-        <line x1={xS(xMin)} y1={yS(rl_y1)} x2={xS(xMax)} y2={yS(rl_y2)}
-          stroke="#8b5cf6" strokeWidth="1.8" strokeDasharray="6 3" opacity="0.85"/>
-        {players.map(p=>(
-          <circle key={p.id} cx={xS(p.decay_coef)} cy={yS(p.base_rapm)} r="5"
-            fill={p.flagged?'#dc2626':'#1d4ed8'} opacity="0.7" stroke="#fff" strokeWidth="1"
-            onClick={()=>onSelect(p)} style={{cursor:'pointer'}}>
-            <title>{p.name} ({p.team}){'\n'}Base RAPM: {p.base_rapm}{'\n'}Decay: {p.decay_coef}</title>
-          </circle>
-        ))}
-        {[-0.0006,-0.0003,0,0.0003].map((v,i)=>(
-          <text key={i} x={xS(v)} y={H+20} textAnchor="middle" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{v.toFixed(4)}</text>
-        ))}
-        <text x={W/2} y={H+34} textAnchor="middle" fontSize="11" fill="#777">Decay coefficient</text>
-        <text x={-32} y={H/2} textAnchor="middle" fontSize="11" fill="#777" transform={`rotate(-90,-32,${H/2})`}>Base RAPM</text>
-        {/* R² badge top-right */}
-        <text x={W} y={13} textAnchor="end" fontSize="10" fill="#8b5cf6" fontFamily="IBM Plex Mono" fontWeight="600">R²={reg.r2.toFixed(3)}</text>
-        <g transform={`translate(4,4)`}>
-          <circle cx="5" cy="5" r="4" fill="#dc2626" opacity="0.8"/>
-          <text x="13" y="9" fontSize="10" fill="#666">Flagged</text>
-          <circle cx="5" cy="20" r="4" fill="#1d4ed8" opacity="0.7"/>
-          <text x="13" y="24" fontSize="10" fill="#666">Normal</text>
-          <line x1="0" y1="35" x2="10" y2="35" stroke="#8b5cf6" strokeWidth="1.8" strokeDasharray="4 2"/>
-          <text x="13" y="39" fontSize="10" fill="#8b5cf6">OLS trend</text>
+    <div style={{position:'relative',display:'inline-block'}}>
+      <svg width={width} height={height} style={{cursor:'crosshair'}} onMouseLeave={()=>setTip(null)}>
+        <g transform={`translate(${m.left},${m.top})`}>
+          <line x1={0} y1={yS(0)} x2={W} y2={yS(0)} stroke="#eee"/>
+          <line x1={xS(0)} y1={0} x2={xS(0)} y2={H} stroke="#ddd" strokeDasharray="4 2"/>
+          <line x1={xS(xMin)} y1={yS(rl_y1)} x2={xS(xMax)} y2={yS(rl_y2)}
+            stroke="#8b5cf6" strokeWidth="1.8" strokeDasharray="6 3" opacity="0.85"/>
+          {players.map(p=>(
+            <circle key={p.id} cx={xS(p.decay_coef)} cy={yS(p.base_rapm)} r="5"
+              fill={p.flagged?'#dc2626':'#1d4ed8'} opacity="0.7" stroke="#fff" strokeWidth="1"
+              onClick={()=>onSelect(p)} style={{cursor:'pointer'}}
+              onMouseEnter={e=>handleMove(e,p)}
+              onMouseMove={e=>handleMove(e,p)}
+              onMouseLeave={()=>setTip(null)}/>
+          ))}
+          {[-0.0006,-0.0003,0,0.0003].map((v,i)=>(
+            <text key={i} x={xS(v)} y={H+20} textAnchor="middle" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{v.toFixed(4)}</text>
+          ))}
+          <text x={W/2} y={H+44} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif">Decay coefficient (per second of shift age)</text>
+          <text x={-40} y={H/2} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif" transform={`rotate(-90,-40,${H/2})`}>Base RAPM (xGD/60 at shift start)</text>
+          <text x={W} y={13} textAnchor="end" fontSize="10" fill="#8b5cf6" fontFamily="IBM Plex Mono" fontWeight="600">R²={reg.r2.toFixed(3)}</text>
+          <g transform={`translate(4,4)`}>
+            <circle cx="5" cy="5" r="4" fill="#dc2626" opacity="0.8"/>
+            <text x="13" y="9" fontSize="10" fill="#666">Flagged</text>
+            <circle cx="5" cy="20" r="4" fill="#1d4ed8" opacity="0.7"/>
+            <text x="13" y="24" fontSize="10" fill="#666">Normal</text>
+            <line x1="0" y1="35" x2="10" y2="35" stroke="#8b5cf6" strokeWidth="1.8" strokeDasharray="4 2"/>
+            <text x="13" y="39" fontSize="10" fill="#8b5cf6">OLS trend</text>
+          </g>
         </g>
-      </g>
-    </svg>
+      </svg>
+      {tip && (
+        <div style={{
+          position:'absolute',
+          left: tip.x + 12,
+          top:  tip.y - 10,
+          background:'#1a1a2e',
+          color:'#fff',
+          borderRadius:6,
+          padding:'8px 11px',
+          fontSize:12,
+          fontFamily:'IBM Plex Sans, sans-serif',
+          pointerEvents:'none',
+          whiteSpace:'nowrap',
+          boxShadow:'0 4px 16px rgba(0,0,0,0.25)',
+          zIndex:999,
+        }}>
+          <div style={{fontWeight:600,marginBottom:3}}>{tip.p.name} <span style={{opacity:0.6,fontWeight:400}}>({tip.p.team})</span></div>
+          <div style={{fontFamily:'IBM Plex Mono',fontSize:11,color:'#a5b4fc'}}>
+            Base RAPM: <span style={{color:'#fff'}}>{tip.p.base_rapm.toFixed(4)}</span>
+          </div>
+          <div style={{fontFamily:'IBM Plex Mono',fontSize:11,color:'#a5b4fc'}}>
+            Decay: <span style={{color:'#fff'}}>{tip.p.decay_coef.toFixed(6)}</span>
+          </div>
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -319,20 +354,34 @@ const OverviewPage = ({setPage, setSelectedPlayer}) => {
         <KPICard label="Median break-even" value={fmtBreak(medBE)} accent="#0891b2"/>
       </div>
 
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:24,marginBottom:36}}>
-        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px 20px 12px'}}>
-          <SectionHeader title="Distribution of Decay Coefficients" sub="Each bar = players in that decay range. Red bars = fastest decay."/>
-          <Histogram players={PLAYERS} width={420} height={190}/>
+      <div style={{display:'flex',flexDirection:'column',gap:20,marginBottom:36}}>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px 24px 16px'}}>
+          <SectionHeader title="Distribution of Decay Coefficients" sub="How many skaters fall into each decay rate bucket. A negative decay coefficient means a player's projected impact drops as the shift ages."/>
+          <div style={{display:'flex',gap:16,alignItems:'flex-start',marginTop:4,marginBottom:10}}>
+            <div style={{fontSize:11,color:'#888',lineHeight:1.5,maxWidth:480}}>
+              <span style={{fontWeight:600,color:'#555'}}>X-axis:</span> Decay coefficient — values left of 0 (red dashed line) mean the player gets worse as their shift ages; values right of 0 mean they improve.<br/>
+              <span style={{fontWeight:600,color:'#555'}}>Y-axis:</span> Number of players in that bucket.<br/>
+              <span style={{fontWeight:600,color:'#555'}}>Color:</span> Red = high decay (negative), blue = low decay (positive).
+            </div>
+          </div>
+          <Histogram players={PLAYERS} width={1100} height={220}/>
         </div>
-        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px 20px 12px'}}>
-          <SectionHeader title="Base RAPM vs. Decay Rate" sub="Click a dot to open the player profile. Red = overuse-flagged. Purple line = OLS trend."/>
+
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px 24px 16px'}}>
+          <SectionHeader title="Base RAPM vs. Decay Rate" sub="Does a player's baseline quality predict how quickly they fade within a shift? Each dot is one skater. Click to open their profile."/>
+          <div style={{fontSize:11,color:'#888',lineHeight:1.5,maxWidth:640,marginTop:4,marginBottom:10}}>
+            <span style={{fontWeight:600,color:'#555'}}>X-axis:</span> Decay coefficient — how fast the player's impact changes per second of shift age (negative = fades, positive = improves).<br/>
+            <span style={{fontWeight:600,color:'#555'}}>Y-axis:</span> Base RAPM — the player's estimated 5v5 impact at the start of a fresh shift, in xG differential per 60.<br/>
+            <span style={{fontWeight:600,color:'#555'}}>Purple line:</span> OLS trend across all players.
+            <span style={{color:'#dc2626',fontWeight:600,marginLeft:12}}>Red dots</span> = overuse-flagged.
+          </div>
           {(() => {
             const xs = PLAYERS.map(p=>p.decay_coef);
             const ys = PLAYERS.map(p=>p.base_rapm);
             const reg = ols(xs, ys);
             return <>
-              <ScatterPlot players={PLAYERS} onSelect={openPlayer} reg={reg} width={420} height={190}/>
-              <div style={{marginTop:8,padding:'7px 10px',background:'#faf9ff',border:'1px solid #e9d5ff',borderRadius:4,fontSize:11,color:'#6b21a8',display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+              <ScatterPlot players={PLAYERS} onSelect={openPlayer} reg={reg} width={1100} height={260}/>
+              <div style={{marginTop:10,padding:'8px 12px',background:'#faf9ff',border:'1px solid #e9d5ff',borderRadius:4,fontSize:11,color:'#6b21a8',display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
                 <span style={{fontFamily:'IBM Plex Mono',fontWeight:600}}>r = {reg.r>=0?'+':''}{reg.r.toFixed(3)}</span>
                 <span style={{color:'#c4b5fd'}}>·</span>
                 <span style={{fontFamily:'IBM Plex Mono',fontWeight:600}}>R² = {reg.r2.toFixed(3)}</span>
