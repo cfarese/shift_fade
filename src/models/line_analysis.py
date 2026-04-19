@@ -108,49 +108,51 @@ def get_top_lines(season: str, n: int = 20, min_toi_min: float = 5.0) -> pd.Data
 
 
 def get_overused_lines(season: str, min_toi_min: float = 5.0) -> pd.DataFrame:
-    ## "overused" lines: avg shift age is high relative to their xg_diff trend
-    ## we flag lines where the last third of their avg shift shows declining xg
-    ## TODO: make this smarter once the R decay coefficients are at line level
+    ## compares early (0-30s) vs late (>45s) xGD/60 for each line combination
+    ## uses vectorized groupby instead of per-combo scans -- O(n_stints) not O(n_combos*n_stints)
 
     stats = get_line_stats(season, min_toi_sec=int(min_toi_min * 60))
+    if stats.empty:
+        return pd.DataFrame()
+
     df = load_stints(season)
     ev = df[df["strength"] == "5v5"].copy()
     ev["home_skaters"] = ev["home_skaters"].apply(lambda x: tuple(int(i) for i in x))
 
-    results = []
-    for _, row in stats.iterrows():
-        combo = row["home_skaters"]
-        target = frozenset(combo)
-        mask = ev["home_skaters"].apply(lambda s: frozenset(s) == target)
-        line_df = ev[mask].copy()
+    ## restrict to combos that passed the min_toi filter
+    valid = set(stats["home_skaters"].tolist())
+    ev = ev[ev["home_skaters"].isin(valid)]
 
-        if len(line_df) < 5:
-            continue
+    early_ev = ev[ev["home_shift_age"] <= 30]
+    late_ev  = ev[ev["home_shift_age"] > 45]
 
-        ## compare xg_diff in early shifts (0-30s) vs late shifts (>45s)
-        early = line_df[line_df["home_shift_age"] <= 30]
-        late  = line_df[line_df["home_shift_age"] > 45]
+    early = early_ev.groupby("home_skaters").agg(
+        early_toi=("duration", "sum"),
+        early_xgf=("xg_for", "sum"),
+        early_xga=("xg_against", "sum"),
+    )
+    late = late_ev.groupby("home_skaters").agg(
+        late_toi=("duration", "sum"),
+        late_xgf=("xg_for", "sum"),
+        late_xga=("xg_against", "sum"),
+    )
 
-        if early.empty or late.empty:
-            continue
+    merged = (
+        stats.set_index("home_skaters")
+        .join(early, how="left")
+        .join(late, how="left")
+        .reset_index()
+        .dropna(subset=["early_toi", "late_toi"])
+    )
+    merged = merged[(merged["early_toi"] >= 30) & (merged["late_toi"] >= 30)]
 
-        def _xgd60(d):
-            sec = d["duration"].sum()
-            if sec == 0:
-                return np.nan
-            return (d["xg_for"].sum() - d["xg_against"].sum()) / sec * 3600
+    if merged.empty:
+        return pd.DataFrame()
 
-        early_xgd = _xgd60(early)
-        late_xgd  = _xgd60(late)
+    merged["early_xgd60"] = (merged["early_xgf"] - merged["early_xga"]) / merged["early_toi"] * 3600
+    merged["late_xgd60"]  = (merged["late_xgf"]  - merged["late_xga"])  / merged["late_toi"]  * 3600
+    merged["decay_delta"] = merged["late_xgd60"] - merged["early_xgd60"]
+    merged["overuse_flag"] = merged["late_xgd60"] < merged["early_xgd60"] - 1.0
 
-        results.append({
-            "home_skaters":   combo,
-            "toi_min":        row["toi_min"],
-            "xg_diff_per60":  row["xg_diff_per60"],
-            "early_xgd60":    early_xgd,
-            "late_xgd60":     late_xgd,
-            "decay_delta":    late_xgd - early_xgd,
-            "overuse_flag":   late_xgd < early_xgd - 1.0,  ## >1 xGD/60 drop is meaningful
-        })
-
-    return pd.DataFrame(results).sort_values("decay_delta")
+    cols = ["home_skaters", "toi_min", "xg_diff_per60", "early_xgd60", "late_xgd60", "decay_delta", "overuse_flag"]
+    return merged[cols].sort_values("decay_delta").reset_index(drop=True)

@@ -1,22 +1,54 @@
 ## Empirical shift-decay analysis at the player level.
 ##
-## This does NOT use the RAPM model -- it directly measures how a player's
-## on-ice xGD/60 changes as their shift ages. Works with any sample size
-## and is more interpretable than RAPM coefficients for coaching decisions.
-##
-## The approach: filter all 5v5 stints where player P was on ice, then
-## bucket by home_shift_age and compute xGD/60 within each bucket.
+## Core idea: build a player-stint index once per season by exploding
+## home/away skater lists into individual rows (one per player per stint).
+## All subsequent queries are fast groupby operations on this index
+## instead of per-player full scans.
 
 from __future__ import annotations
-
-from functools import lru_cache
 
 import numpy as np
 import pandas as pd
 from loguru import logger
 
-from config.settings import cfg
 from src.models.line_analysis import load_stints
+
+## module-level cache keyed by season -- avoids rebuilding the exploded
+## index on every dashboard interaction (lru_cache doesn't work on DataFrames)
+_INDEX_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def _get_player_index(season: str) -> pd.DataFrame:
+    ## explodes every 5v5 stint into one row per on-ice player
+    ## columns: player_id, duration, p_xg_for, p_xg_against, shift_age
+
+    if season in _INDEX_CACHE:
+        return _INDEX_CACHE[season]
+
+    df   = load_stints(season)
+    ev   = df[df["strength"] == "5v5"].reset_index(drop=True)
+
+    ## home side -- xg_for/against are already from home team's POV
+    home = ev[["duration", "xg_for", "xg_against", "home_shift_age", "home_skaters"]].copy()
+    home = home.explode("home_skaters")
+    home = home.rename(columns={"home_skaters": "player_id", "home_shift_age": "shift_age"})
+    home["p_xg_for"]     = home["xg_for"]
+    home["p_xg_against"] = home["xg_against"]
+
+    ## away side -- flip for/against so "for" always means the player's team
+    away = ev[["duration", "xg_for", "xg_against", "away_shift_age", "away_skaters"]].copy()
+    away = away.explode("away_skaters")
+    away = away.rename(columns={"away_skaters": "player_id", "away_shift_age": "shift_age"})
+    away["p_xg_for"]     = away["xg_against"]
+    away["p_xg_against"] = away["xg_for"]
+
+    cols   = ["player_id", "duration", "p_xg_for", "p_xg_against", "shift_age"]
+    result = pd.concat([home[cols], away[cols]], ignore_index=True)
+    result["player_id"] = result["player_id"].astype(int)
+
+    _INDEX_CACHE[season] = result
+    logger.debug(f"Built player index for {season}: {len(result)} player-stint rows")
+    return result
 
 
 def get_player_empirical_decay(
@@ -25,33 +57,11 @@ def get_player_empirical_decay(
     bucket_size: int = 10,
     min_toi_sec: int = 60,
 ) -> pd.DataFrame:
-    ## returns shift-age bucketed xGD/60 for one player
-    ## min_toi_sec is the minimum seconds in a bucket to include it
-
-    df = load_stints(season)
-    ev = df[df["strength"] == "5v5"].copy()
-
-    ## find stints where this player was on ice (home or away)
-    home_mask = ev["home_skaters"].apply(lambda s: player_id in s)
-    away_mask = ev["away_skaters"].apply(lambda s: player_id in s)
-    on_ice    = ev[home_mask | away_mask].copy()
+    index  = _get_player_index(season)
+    on_ice = index[index["player_id"] == player_id].copy()
 
     if on_ice.empty:
         return pd.DataFrame()
-
-    ## from the player's perspective: on-ice xGF and xGA
-    ## when the player is on the home team, for/against is as-is
-    ## when away, flip it so "for" always means the player's team
-    on_ice["player_home"] = home_mask[on_ice.index]
-    on_ice["p_xg_for"]    = np.where(on_ice["player_home"], on_ice["xg_for"],    on_ice["xg_against"])
-    on_ice["p_xg_against"] = np.where(on_ice["player_home"], on_ice["xg_against"], on_ice["xg_for"])
-
-    ## use home_shift_age when player is home, away_shift_age when away
-    on_ice["shift_age"] = np.where(
-        on_ice["player_home"],
-        on_ice["home_shift_age"],
-        on_ice["away_shift_age"],
-    )
 
     on_ice["shift_bucket"] = (on_ice["shift_age"] // bucket_size) * bucket_size
     on_ice["shift_bucket"] = on_ice["shift_bucket"].clip(upper=90)
@@ -72,66 +82,46 @@ def get_player_empirical_decay(
         return pd.DataFrame()
 
     bucketed["xg_diff_per60"] = (bucketed["xg_for"] - bucketed["xg_against"]) / bucketed["toi_sec"] * 3600
-    ## rough SE using Poisson assumption on xG totals
-    bucketed["se"] = np.sqrt(bucketed["xg_for"] + bucketed["xg_against"]) / bucketed["toi_sec"] * 3600
-    bucketed["toi_min"] = bucketed["toi_sec"] / 60
+    bucketed["se"]            = np.sqrt(bucketed["xg_for"] + bucketed["xg_against"]) / bucketed["toi_sec"] * 3600
+    bucketed["toi_min"]       = bucketed["toi_sec"] / 60
 
     return bucketed.sort_values("shift_bucket")
 
 
 def get_league_decay_summary(season: str, min_toi_sec: int = 1800) -> pd.DataFrame:
-    ## for every player with enough ice time, compute their early vs late xGD/60
-    ## returns a sortable table the dashboard can display directly
+    index = _get_player_index(season)
 
-    df = load_stints(season)
-    ev = df[df["strength"] == "5v5"].copy()
+    ## total TOI filter
+    total = index.groupby("player_id")["duration"].sum().rename("total_toi")
 
-    ## get all unique player IDs
-    all_players: set[int] = set()
-    for s in ev["home_skaters"]:
-        all_players.update(int(i) for i in s)
-    for s in ev["away_skaters"]:
-        all_players.update(int(i) for i in s)
+    ## early shift (0-30s) and late shift (>45s) buckets
+    early = (
+        index[index["shift_age"] <= 30]
+        .groupby("player_id")
+        .agg(early_toi=("duration", "sum"), early_xgf=("p_xg_for", "sum"), early_xga=("p_xg_against", "sum"))
+    )
+    late = (
+        index[index["shift_age"] > 45]
+        .groupby("player_id")
+        .agg(late_toi=("duration", "sum"), late_xgf=("p_xg_for", "sum"), late_xga=("p_xg_against", "sum"))
+    )
 
-    results = []
-    for pid in all_players:
-        home_mask  = ev["home_skaters"].apply(lambda s: pid in s)
-        away_mask  = ev["away_skaters"].apply(lambda s: pid in s)
-        on_ice     = ev[home_mask | away_mask]
+    merged = total.to_frame().join(early, how="left").join(late, how="left").reset_index()
+    merged = merged[
+        (merged["total_toi"] >= min_toi_sec) &
+        (merged["early_toi"] >= 30) &
+        (merged["late_toi"]  >= 30)
+    ]
 
-        total_toi = on_ice["duration"].sum()
-        if total_toi < min_toi_sec:
-            continue
+    if merged.empty:
+        return pd.DataFrame()
 
-        is_home     = home_mask[on_ice.index]
-        xg_for      = np.where(is_home, on_ice["xg_for"],    on_ice["xg_against"])
-        xg_against  = np.where(is_home, on_ice["xg_against"], on_ice["xg_for"])
-        shift_age   = np.where(is_home, on_ice["home_shift_age"], on_ice["away_shift_age"])
+    merged["early_xgd60"]  = (merged["early_xgf"] - merged["early_xga"]) / merged["early_toi"] * 3600
+    merged["late_xgd60"]   = (merged["late_xgf"]  - merged["late_xga"])  / merged["late_toi"]  * 3600
+    merged["decay_delta"]  = merged["late_xgd60"] - merged["early_xgd60"]
+    merged["toi_min"]      = merged["total_toi"] / 60
+    merged["early_toi_min"] = merged["early_toi"] / 60
+    merged["late_toi_min"]  = merged["late_toi"]  / 60
 
-        early = on_ice["duration"].values[shift_age <= 30]
-        late  = on_ice["duration"].values[shift_age > 45]
-        early_xgf = xg_for[shift_age <= 30]
-        early_xga = xg_against[shift_age <= 30]
-        late_xgf  = xg_for[shift_age > 45]
-        late_xga  = xg_against[shift_age > 45]
-
-        early_toi = early.sum()
-        late_toi  = late.sum()
-
-        if early_toi < 30 or late_toi < 30:
-            continue
-
-        early_xgd60 = (early_xgf.sum() - early_xga.sum()) / early_toi * 3600
-        late_xgd60  = (late_xgf.sum()  - late_xga.sum())  / late_toi  * 3600
-
-        results.append({
-            "player_id":    pid,
-            "toi_min":      total_toi / 60,
-            "early_xgd60":  early_xgd60,
-            "late_xgd60":   late_xgd60,
-            "decay_delta":  late_xgd60 - early_xgd60,
-            "early_toi_min": early_toi / 60,
-            "late_toi_min":  late_toi  / 60,
-        })
-
-    return pd.DataFrame(results).sort_values("decay_delta") if results else pd.DataFrame()
+    cols = ["player_id", "toi_min", "early_xgd60", "late_xgd60", "decay_delta", "early_toi_min", "late_toi_min"]
+    return merged[cols].sort_values("decay_delta").reset_index(drop=True)

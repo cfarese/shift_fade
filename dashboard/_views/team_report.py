@@ -9,8 +9,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.models.rapm_reader import compute_decay_curve, get_break_even_second
-from src.models.line_analysis import get_line_stats, get_overused_lines
+from src.models.line_analysis import get_overused_lines
 from src.ingestion.roster import get_cached_names
+from dashboard.components.clickable_table import clickable_player_table
 
 
 def render(season: str, rapm: pd.DataFrame | None, stints: pd.DataFrame | None):
@@ -22,15 +23,14 @@ def render(season: str, rapm: pd.DataFrame | None, stints: pd.DataFrame | None):
 
     teams = sorted(rapm["team"].dropna().unique())
     if not teams:
-        st.warning("No team data in RAPM results. Player name lookup may not have run yet.")
+        st.warning("No team data in RAPM results. Run resolve_names first: python3.11 -m src.ingestion.resolve_names --season " + season)
         return
 
     selected_team = st.selectbox("Select team", teams)
-    team_rapm = rapm[rapm["team"] == selected_team].copy()
+    team_rapm = rapm[rapm["team"] == selected_team].copy().reset_index(drop=True)
     team_rapm["break_even_sec"] = team_rapm.apply(
         lambda r: get_break_even_second(r["rapm_base"], r["rapm_decay"]), axis=1
     )
-    ## team summary metrics
 
     st.markdown("---")
     m1, m2, m3, m4 = st.columns(4)
@@ -44,36 +44,43 @@ def render(season: str, rapm: pd.DataFrame | None, stints: pd.DataFrame | None):
         else "N/A",
     )
 
-    ## player roster table with overuse highlight
-
+    ## player roster table with clickable names
     st.subheader("Roster Breakdown")
+    st.caption("Click a player name to open their profile.")
 
-    roster_display = team_rapm[["player_name", "rapm_base", "rapm_decay", "toi_5v5", "break_even_sec", "overuse_flag"]].copy()
-    roster_display.columns = ["Player", "Base RAPM", "Decay", "TOI (min)", "Break-even (s)", "Flagged"]
-    roster_display = roster_display.sort_values("Decay")
-
-    ## highlight flagged rows in the table
-    def _highlight_flagged(row):
-        color = "background-color: #fde8e4" if row["Flagged"] else ""
-        return [color] * len(row)
-
-    st.dataframe(
-        roster_display.style.apply(_highlight_flagged, axis=1),
-        use_container_width=True,
-        hide_index=True,
+    roster_src = team_rapm.sort_values("rapm_decay").reset_index(drop=True).copy()
+    comp_rows = [
+        {
+            "id": int(r["player_id"]),
+            "values": [
+                r["player_name"],
+                f"{r['rapm_base']:.4f}",
+                f"{r['rapm_decay']:.4f}",
+                f"{r['toi_5v5']:.1f}",
+                f"{int(r['break_even_sec'])}s" if pd.notna(r["break_even_sec"]) else "Never",
+                "Yes" if r["overuse_flag"] else "",
+            ],
+        }
+        for _, r in roster_src.iterrows()
+    ]
+    clicked = clickable_player_table(
+        rows=comp_rows,
+        headers=["Player", "Base RAPM", "Decay", "TOI (min)", "Break-even", "Flagged"],
+        key="team_roster_table",
     )
+    if clicked is not None:
+        st.session_state["selected_player_id"] = clicked
+        st.rerun()
 
-    ## decay curves for all players on the team
-
+    ## decay curves overlay
     st.subheader("Decay Curves -- All Skaters")
     st.caption("Each line is one player. Red = overuse flagged.")
 
     fig = go.Figure()
-
     for _, row in team_rapm.iterrows():
         buckets, values = compute_decay_curve(row["rapm_base"], row["rapm_decay"], max_seconds=75)
-        color = "#d6604d" if row["overuse_flag"] else "#4393c3"
-        opacity = 0.9 if row["overuse_flag"] else 0.4
+        color   = "#d6604d" if row["overuse_flag"] else "#4393c3"
+        opacity = 0.9       if row["overuse_flag"] else 0.4
 
         fig.add_trace(go.Scatter(
             x=buckets,
@@ -87,7 +94,6 @@ def render(season: str, rapm: pd.DataFrame | None, stints: pd.DataFrame | None):
 
     fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.5)
     fig.add_vline(x=45, line_dash="dot", line_color="gray", opacity=0.4, annotation_text="Avg shift")
-
     fig.update_layout(
         xaxis_title="Shift age (seconds)",
         yaxis_title="Projected xG diff per 60",
@@ -95,11 +101,9 @@ def render(season: str, rapm: pd.DataFrame | None, stints: pd.DataFrame | None):
         hovermode="x",
         showlegend=False,
     )
-
     st.plotly_chart(fig, use_container_width=True)
 
     ## break-even bar chart
-
     st.subheader("Break-even Shift Length per Player")
     st.caption("Players who go negative before the average shift (45s) are overused.")
 
@@ -115,37 +119,39 @@ def render(season: str, rapm: pd.DataFrame | None, stints: pd.DataFrame | None):
             orientation="h",
             color="overuse_flag",
             color_discrete_map={True: "#d6604d", False: "#4393c3"},
-            labels={
-                "break_even_sec": "Break-even (seconds)",
-                "player_name": "",
-                "overuse_flag": "Flagged",
-            },
+            labels={"break_even_sec": "Break-even (seconds)", "player_name": "", "overuse_flag": "Flagged"},
             height=max(300, len(bev_df) * 28),
         )
         fig2.add_vline(x=45, line_dash="dash", line_color="gray", annotation_text="Avg shift (45s)")
         fig2.update_layout(showlegend=False)
         st.plotly_chart(fig2, use_container_width=True)
 
-    ## overused lines for this team
-   
+    ## overused lines
     if stints is not None:
         st.subheader("Line Combinations -- Overuse Check")
         name_map = get_cached_names()
 
-        ## filter stints to this team's home games only
-        ## TODO: need team ID in stints df to do this properly
-        st.caption("Note: line filtering by team requires team ID in stint data. Showing all lines for now.")
-
         try:
             overuse = get_overused_lines(season, min_toi_min=3.0)
             if not overuse.empty:
-                overuse["line"] = overuse["home_skaters"].apply(
-                    lambda c: " / ".join(name_map.get(pid, {}).get("name", str(pid)) for pid in c)
-                )
-                flagged = overuse[overuse["overuse_flag"]][["line", "toi_min", "early_xgd60", "late_xgd60", "decay_delta"]]
+                flagged = overuse[overuse["overuse_flag"]].copy()
+                for c in ["toi_min", "early_xgd60", "late_xgd60", "decay_delta"]:
+                    flagged[c] = flagged[c].round(2)
+
                 if not flagged.empty:
                     st.error(f"{len(flagged)} line combinations flagged for overuse")
-                    st.dataframe(flagged.round(2), use_container_width=True, hide_index=True)
+                    flagged_display = flagged.copy()
+                    flagged_display["Line"] = flagged_display["home_skaters"].apply(
+                        lambda c: " / ".join(name_map.get(pid, {}).get("name", str(pid)) for pid in c)
+                    )
+                    st.dataframe(
+                        flagged_display[["Line", "toi_min", "early_xgd60", "late_xgd60", "decay_delta"]].rename(
+                            columns={"toi_min": "TOI (min)", "early_xgd60": "Early xGD/60",
+                                     "late_xgd60": "Late xGD/60", "decay_delta": "Decay"}
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
                 else:
                     st.success("No line combinations flagged.")
         except FileNotFoundError:

@@ -13,6 +13,7 @@ from src.ingestion.roster import get_cached_names
 from src.models.player_decay import get_player_empirical_decay, get_league_decay_summary
 from src.models.rapm_reader import compute_decay_curve, get_break_even_second
 from src.models.line_analysis import load_stints
+from dashboard.components.clickable_table import clickable_player_table
 
 
 def render(season: str, rapm: pd.DataFrame | None):
@@ -58,6 +59,7 @@ def render(season: str, rapm: pd.DataFrame | None):
             selected_label = st.selectbox("Select player", player_labels, key="emp_player")
             if selected_label:
                 pid = label_to_id[selected_label]
+
                 bucket_df = get_player_empirical_decay(season, pid, bucket_size=10, min_toi_sec=30)
 
                 if bucket_df.empty:
@@ -119,7 +121,7 @@ def render(season: str, rapm: pd.DataFrame | None):
 
         with col_right:
             st.markdown("**Biggest early-to-late drops**")
-            st.caption("Min 30 TOI minutes")
+            st.caption("Min 30 TOI minutes. Click a row to open the profile.")
             try:
                 summary = get_league_decay_summary(season, min_toi_sec=1800)
             except FileNotFoundError:
@@ -127,17 +129,34 @@ def render(season: str, rapm: pd.DataFrame | None):
                 summary = pd.DataFrame()
 
             if not summary.empty:
-                summary["Player"] = summary["player_id"].apply(
+                summary["player_name"] = summary["player_id"].apply(
                     lambda p: name_map.get(p, {}).get("name", f"Player_{p}")
                 )
-                summary["Team"] = summary["player_id"].apply(
+                summary["team"] = summary["player_id"].apply(
                     lambda p: name_map.get(p, {}).get("team", "")
                 )
-                tbl = summary[["Player", "Team", "early_xgd60", "late_xgd60", "decay_delta"]].copy()
-                tbl.columns = ["Player", "Team", "Early", "Late", "Drop"]
-                for c in ["Early", "Late", "Drop"]:
-                    tbl[c] = tbl[c].round(2)
-                st.dataframe(tbl.head(20), use_container_width=True, hide_index=True)
+                summary_src = summary.head(20).reset_index(drop=True)
+                comp_rows = [
+                    {
+                        "id": int(r["player_id"]),
+                        "values": [
+                            r["player_name"],
+                            r.get("team", ""),
+                            f"{r['early_xgd60']:.2f}",
+                            f"{r['late_xgd60']:.2f}",
+                            f"{r['decay_delta']:.2f}",
+                        ],
+                    }
+                    for _, r in summary_src.iterrows()
+                ]
+                clicked = clickable_player_table(
+                    rows=comp_rows,
+                    headers=["Player", "Team", "Early", "Late", "Drop"],
+                    key="players_decay_table",
+                )
+                if clicked is not None:
+                    st.session_state["selected_player_id"] = clicked
+                    st.rerun()
 
     ## ---------------------------------------------------------------------------
     ## tab 2: RAPM model output
@@ -163,15 +182,25 @@ def render(season: str, rapm: pd.DataFrame | None):
         with col_filter:
             teams = sorted(rapm["team"].dropna().unique())
             team_filter = st.selectbox("Filter by team", ["All"] + list(teams), key="rapm_team")
-        with col_search:
-            display_df = rapm if team_filter == "All" else rapm[rapm["team"] == team_filter]
-            player_opts = display_df.sort_values("player_name")["player_name"].tolist()
-            selected_name = st.selectbox("Select player", player_opts, key="rapm_player")
 
-        if not selected_name:
+        display_df  = rapm if team_filter == "All" else rapm[rapm["team"] == team_filter]
+        player_opts = display_df.sort_values("player_name")["player_name"].tolist()
+
+        if not player_opts:
+            st.info("No players found for this team.")
             return
 
-        row = rapm[rapm["player_name"] == selected_name].iloc[0]
+        with col_search:
+            selected_name = st.selectbox("Select player", player_opts, key="rapm_player")
+
+        ## guard against stale session state value from a different team filter
+        match = rapm[rapm["player_name"] == selected_name]
+        if match.empty:
+            st.info("Select a player above.")
+            return
+
+        row = match.iloc[0]
+
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Base RAPM", f"{row['rapm_base']:.4f}")
         m2.metric("Decay coef", f"{row['rapm_decay']:.6f}")

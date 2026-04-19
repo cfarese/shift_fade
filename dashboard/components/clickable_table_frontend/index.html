@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; font-size: 14px; font-family: "Source Sans Pro", sans-serif; }
+  * { box-sizing: border-box; }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left;
+    padding: 7px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  tbody tr { border-bottom: 1px solid var(--border); }
+  tbody tr:hover { background: var(--hover); }
+  td { padding: 6px 12px; color: var(--text); }
+  .name-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    color: var(--link);
+    font-size: 14px;
+    font-family: inherit;
+    font-weight: 500;
+  }
+  .name-btn:hover { text-decoration: underline; }
+  .sep { opacity: 0.4; margin: 0 2px; }
+</style>
+</head>
+<body>
+<table>
+  <thead id="thead"></thead>
+  <tbody id="tbody"></tbody>
+</table>
+<script>
+  function post(type, payload) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, payload), "*");
+  }
+
+  function applyTheme(t) {
+    if (!t) return;
+    var dark = t.base === "dark";
+    var r = document.documentElement;
+    r.style.setProperty("--text",   t.textColor || (dark ? "#fafafa" : "#31333F"));
+    r.style.setProperty("--muted",  dark ? "rgba(250,250,250,0.45)" : "rgba(49,51,63,0.45)");
+    r.style.setProperty("--border", dark ? "rgba(250,250,250,0.08)" : "rgba(49,51,63,0.1)");
+    r.style.setProperty("--hover",  dark ? "rgba(250,250,250,0.04)" : "rgba(49,51,63,0.04)");
+    r.style.setProperty("--link",   t.primaryColor || "#ff4b4b");
+    document.body.style.color      = t.textColor || "";
+    document.body.style.background = "transparent";
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  function render(args, theme) {
+    applyTheme(theme);
+    var rows    = args.rows    || [];
+    var headers = args.headers || [];
+
+    document.getElementById("thead").innerHTML =
+      "<tr>" + headers.map(function(h){ return "<th>" + esc(h) + "</th>"; }).join("") + "</tr>";
+
+    document.getElementById("tbody").innerHTML = rows.map(function(row) {
+      var firstCell;
+
+      if (row.players) {
+        // multi-player line row: render each name as its own button separated by " / "
+        var links = row.players.map(function(p) {
+          return '<button class="name-btn" onclick="pick(' + p.id + ')">' + esc(p.name) + '</button>';
+        }).join('<span class="sep"> / </span>');
+        firstCell = "<td>" + links + "</td>";
+      } else {
+        // single-player row
+        firstCell = '<td><button class="name-btn" onclick="pick(' + row.id + ')">' + esc(String(row.values[0])) + '</button></td>';
+      }
+
+      var restValues = row.players ? row.values : row.values.slice(1);
+      var restCells  = restValues.map(function(v) {
+        return "<td>" + esc(String(v)) + "</td>";
+      }).join("");
+
+      return "<tr>" + firstCell + restCells + "</tr>";
+    }).join("");
+
+    window.setTimeout(function() {
+      post("streamlit:setFrameHeight", { height: document.body.scrollHeight + 2 });
+    }, 0);
+  }
+
+  function pick(id) {
+    post("streamlit:setComponentValue", { value: id });
+  }
+
+  window.addEventListener("message", function(e) {
+    if (e.data.type === "streamlit:render") render(e.data.args, e.data.theme);
+  });
+
+  post("streamlit:componentReady", { apiVersion: 1 });
+</script>
+</body>
+</html>

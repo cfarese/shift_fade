@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.models.rapm_reader import get_break_even_second
+from dashboard.components.clickable_table import clickable_player_table
 
 
 def render(season: str, rapm: pd.DataFrame | None):
@@ -100,18 +101,33 @@ def render(season: str, rapm: pd.DataFrame | None):
     ## ---------------------------------------------------------------------------
 
     st.subheader("Most Overused Players (fastest decay, min 50 min TOI)")
-    worst = (
+    st.caption("Click a player name to open their profile.")
+    worst_src = (
         rapm[rapm["toi_5v5"] >= 50]
         .sort_values("rapm_decay")
-        .head(15)[["player_name", "team", "rapm_base", "rapm_decay", "toi_5v5", "break_even_sec", "overuse_flag"]]
-        .rename(columns={
-            "player_name": "Player",
-            "team": "Team",
-            "rapm_base": "Base RAPM",
-            "rapm_decay": "Decay",
-            "toi_5v5": "TOI (min)",
-            "break_even_sec": "Break-even (s)",
-            "overuse_flag": "Flagged",
-        })
+        .head(15)
+        .reset_index(drop=True)
     )
-    st.dataframe(worst, use_container_width=True, hide_index=True)
+    rows = [
+        {
+            "id": int(r["player_id"]),
+            "values": [
+                r["player_name"],
+                r.get("team", ""),
+                f"{r['rapm_base']:.4f}",
+                f"{r['rapm_decay']:.4f}",
+                f"{r['toi_5v5']:.1f}",
+                f"{int(r['break_even_sec'])}s" if pd.notna(r["break_even_sec"]) else "Never",
+                "Yes" if r["overuse_flag"] else "",
+            ],
+        }
+        for _, r in worst_src.iterrows()
+    ]
+    clicked = clickable_player_table(
+        rows=rows,
+        headers=["Player", "Team", "Base RAPM", "Decay", "TOI (min)", "Break-even", "Flagged"],
+        key="overview_worst",
+    )
+    if clicked is not None:
+        st.session_state["selected_player_id"] = clicked
+        st.rerun()

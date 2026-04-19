@@ -8,11 +8,11 @@ import streamlit as st
 
 from src.models.line_analysis import get_line_decay_by_bucket, get_line_stats, get_overused_lines
 from src.ingestion.roster import get_cached_names
+from dashboard.components.clickable_table import clickable_player_table
 
 
 def _format_combo(skater_ids: tuple, name_map: dict) -> str:
-    names = [name_map.get(pid, {}).get("name", str(pid)) for pid in skater_ids]
-    return " / ".join(names)
+    return " / ".join(name_map.get(pid, {}).get("name", str(pid)) for pid in skater_ids)
 
 
 def render(season: str, stints: pd.DataFrame | None):
@@ -34,6 +34,7 @@ def render(season: str, stints: pd.DataFrame | None):
 
     with tab1:
         st.subheader("Best Lines by xG Differential per 60 (5v5)")
+        st.caption("Select a line below the table to view its decay curve and navigate to individual player profiles.")
 
         try:
             stats = get_line_stats(season, min_toi_sec=int(min_toi * 60))
@@ -45,36 +46,53 @@ def render(season: str, stints: pd.DataFrame | None):
             st.info("No line combinations met the minimum TOI threshold.")
             return
 
-        stats["line"] = stats["home_skaters"].apply(lambda c: _format_combo(c, name_map))
-        display_cols = ["line", "toi_min", "xg_diff_per60", "xgf_pct", "cf_pct", "avg_shift_age", "n_stints"]
-        display = stats[display_cols].rename(columns={
-            "line": "Line",
-            "toi_min": "TOI (min)",
-            "xg_diff_per60": "xGD/60",
-            "xgf_pct": "xGF%",
-            "cf_pct": "CF%",
-            "avg_shift_age": "Avg Shift Age (s)",
-            "n_stints": "Stints",
-        })
-        display["xGD/60"] = display["xGD/60"].round(2)
-        display["xGF%"] = (display["xGF%"] * 100).round(1)
-        display["CF%"] = (display["CF%"] * 100).round(1)
-        display["TOI (min)"] = display["TOI (min)"].round(1)
-        display["Avg Shift Age (s)"] = display["Avg Shift Age (s)"].round(1)
+        display_src = stats.head(25).copy()
+        display_src["Line"]              = display_src["home_skaters"].apply(lambda c: _format_combo(c, name_map))
+        display_src["TOI (min)"]        = display_src["toi_min"].round(1)
+        display_src["xGD/60"]           = display_src["xg_diff_per60"].round(2)
+        display_src["xGF%"]             = (display_src["xgf_pct"] * 100).round(1)
+        display_src["CF%"]              = (display_src["cf_pct"] * 100).round(1)
+        display_src["Avg Shift Age (s)"] = display_src["avg_shift_age"].round(1)
+        display_src["Stints"]           = display_src["n_stints"]
 
-        st.dataframe(display.head(25), use_container_width=True, hide_index=True)
+        comp_rows = [
+            {
+                "players": [
+                    {"id": int(pid), "name": name_map.get(int(pid), {}).get("name", str(pid))}
+                    for pid in r["home_skaters"]
+                ],
+                "values": [
+                    f"{r['toi_min']:.1f}",
+                    f"{r['xg_diff_per60']:.2f}",
+                    f"{r['xgf_pct'] * 100:.1f}",
+                    f"{r['cf_pct'] * 100:.1f}",
+                    f"{r['avg_shift_age']:.1f}",
+                    str(int(r["n_stints"])),
+                ],
+            }
+            for _, r in display_src.iterrows()
+        ]
+        clicked = clickable_player_table(
+            rows=comp_rows,
+            headers=["Line", "TOI (min)", "xGD/60", "xGF%", "CF%", "Avg Shift Age (s)", "Stints"],
+            key="lines_top",
+        )
+        if clicked is not None:
+            st.session_state["selected_player_id"] = clicked
+            st.rerun()
 
         ## decay curve for a selected line
         st.markdown("---")
         st.subheader("Shift Decay Curve for Selected Line")
 
-        line_options = stats["home_skaters"].tolist()
-        line_labels  = stats["line"].tolist()
-        label_to_combo = dict(zip(line_labels, line_options))
+        stats["_label"] = stats["home_skaters"].apply(lambda c: _format_combo(c, name_map))
+        line_options    = stats["home_skaters"].tolist()
+        line_labels     = stats["_label"].tolist()
+        label_to_combo  = dict(zip(line_labels, line_options))
 
         selected_label = st.selectbox("Select line", line_labels)
         if selected_label:
-            combo = label_to_combo[selected_label]
+            combo     = label_to_combo[selected_label]
             bucket_df = get_line_decay_by_bucket(season, combo)
 
             if bucket_df.empty:
@@ -100,7 +118,6 @@ def render(season: str, stints: pd.DataFrame | None):
                 fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.6)
                 fig.add_vline(x=45, line_dash="dot", line_color="gray", opacity=0.4, annotation_text="Avg shift")
 
-                ## color background by positive/negative zone
                 fig.update_layout(
                     xaxis_title="Shift age (seconds)",
                     yaxis_title="xG diff per 60",
@@ -111,10 +128,21 @@ def render(season: str, stints: pd.DataFrame | None):
 
                 st.plotly_chart(fig, use_container_width=True)
 
-                col1, col2, col3 = st.columns(3)
-                col1.metric("TOI (min)", f"{stats[stats['home_skaters']==combo]['toi_min'].values[0]:.1f}")
-                col2.metric("Avg shift age", f"{stats[stats['home_skaters']==combo]['avg_shift_age'].values[0]:.1f}s")
-                col3.metric("Stints", int(stats[stats['home_skaters']==combo]['n_stints'].values[0]))
+                row_match = stats[stats["home_skaters"] == combo]
+                if not row_match.empty:
+                    r = row_match.iloc[0]
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("TOI (min)", f"{r['toi_min']:.1f}")
+                    col2.metric("Avg shift age", f"{r['avg_shift_age']:.1f}s")
+                    col3.metric("Stints", int(r["n_stints"]))
+
+                st.caption("View individual player profiles:")
+                btn_cols = st.columns(len(combo))
+                for col, pid in zip(btn_cols, combo):
+                    pname = name_map.get(pid, {}).get("name", str(pid))
+                    if col.button(pname, key=f"line_player_{pid}"):
+                        st.session_state["selected_player_id"] = pid
+                        st.rerun()
 
     ## ---------------------------------------------------------------------------
     ## tab 2: overuse report
@@ -134,27 +162,42 @@ def render(season: str, stints: pd.DataFrame | None):
             st.info("No line combinations met the threshold.")
             return
 
-        overuse_df["line"] = overuse_df["home_skaters"].apply(lambda c: _format_combo(c, name_map))
-        display = overuse_df[["line", "toi_min", "early_xgd60", "late_xgd60", "decay_delta", "overuse_flag"]].rename(columns={
-            "line": "Line",
-            "toi_min": "TOI (min)",
-            "early_xgd60": "Early xGD/60 (0-30s)",
-            "late_xgd60": "Late xGD/60 (>45s)",
-            "decay_delta": "Decay",
-            "overuse_flag": "Flagged",
-        })
+        for c in ["toi_min", "early_xgd60", "late_xgd60", "decay_delta"]:
+            overuse_df[c] = overuse_df[c].round(2)
 
-        for col in ["TOI (min)", "Early xGD/60 (0-30s)", "Late xGD/60 (>45s)", "Decay"]:
-            display[col] = display[col].round(2)
+        flagged     = overuse_df[overuse_df["overuse_flag"]].copy()
+        not_flagged = overuse_df[~overuse_df["overuse_flag"]].copy()
 
-        flagged = display[display["Flagged"]].drop(columns=["Flagged"])
-        not_flagged = display[~display["Flagged"]].drop(columns=["Flagged"])
+        def _overuse_rows(df, key):
+            rows = [
+                {
+                    "players": [
+                        {"id": int(pid), "name": name_map.get(int(pid), {}).get("name", str(pid))}
+                        for pid in r["home_skaters"]
+                    ],
+                    "values": [
+                        f"{r['toi_min']:.2f}",
+                        f"{r['early_xgd60']:.2f}",
+                        f"{r['late_xgd60']:.2f}",
+                        f"{r['decay_delta']:.2f}",
+                    ],
+                }
+                for _, r in df.iterrows()
+            ]
+            clicked = clickable_player_table(
+                rows=rows,
+                headers=["Line", "TOI (min)", "Early xGD/60", "Late xGD/60", "Decay"],
+                key=key,
+            )
+            if clicked is not None:
+                st.session_state["selected_player_id"] = clicked
+                st.rerun()
 
         if not flagged.empty:
             st.error(f"{len(flagged)} lines flagged for overuse")
-            st.dataframe(flagged, use_container_width=True, hide_index=True)
+            _overuse_rows(flagged, "lines_overuse_flagged")
         else:
             st.success("No lines flagged for overuse at this TOI threshold.")
 
         with st.expander("Show all lines"):
-            st.dataframe(not_flagged, use_container_width=True, hide_index=True)
+            _overuse_rows(not_flagged, "lines_overuse_all")

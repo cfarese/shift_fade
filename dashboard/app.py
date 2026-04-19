@@ -67,10 +67,34 @@ def _no_data_warning(what: str):
 
 
 ## ---------------------------------------------------------------------------
-## pages
+## player profile routing
+##
+## views call st.rerun() after setting selected_player_id.
+## on that rerun, record _player_page (the sidebar page when selection happened)
+## so we can detect when the user navigates away via the sidebar.
 ## ---------------------------------------------------------------------------
 
-if page == "Overview":
+pid = st.session_state.get("selected_player_id")
+
+if pid is not None and "_player_page" not in st.session_state:
+    ## first rerun after a player was selected -- lock in the source page
+    st.session_state["_player_page"] = page
+
+if pid is not None and st.session_state.get("_player_page") != page:
+    ## user clicked a different sidebar page -- clear the profile and rerun
+    st.session_state["selected_player_id"] = None
+    st.session_state.pop("_player_page", None)
+    st.rerun()
+
+## ---------------------------------------------------------------------------
+## pages -- player profile takes over the whole screen when a player is selected
+## ---------------------------------------------------------------------------
+
+if st.session_state.get("selected_player_id") is not None:
+    from dashboard._views.player_profile import render as render_profile
+    render_profile(st.session_state["selected_player_id"], season, _load_rapm(season))
+
+elif page == "Overview":
     from dashboard._views.overview import render
     render(season, _load_rapm(season))
 
