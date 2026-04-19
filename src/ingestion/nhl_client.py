@@ -45,23 +45,24 @@ class NHLClient:
         return r.json()
 
     def get_season_game_ids(self, season: str) -> list[int]:
-        ## game IDs encode season + game type + number
+        ## game IDs are 10 digits: YYYY02NNNN
         ## e.g. 2023020001 is game 1 of the 2023-24 regular season
-        game_ids: list[int] = []
-
-        ## regular season game type is 02, prefix encodes that
-        season_prefix = int(season[:8]) * 1_000_000 + 20_000
+        ## season[:4] gives the start year (2023 from "20232024")
+        season_prefix = int(season[:4]) * 1_000_000 + 20_000
         ## 1312 regular season games per 32-team season
-        for game_num in range(1, 1313):
-            game_ids.append(season_prefix + game_num)
-
-        ## TODO: find a cleaner endpoint for this instead of constructing IDs manually
-        return game_ids
+        return [season_prefix + n for n in range(1, 1313)]
 
     def get_play_by_play(self, game_id: int) -> dict:
         ## returns the raw API dict, callers handle parsing
         url = f"{cfg.nhl_api.base_url}/gamecenter/{game_id}/play-by-play"
         return self._get(url)
+
+    def get_shifts(self, game_id: int) -> list[dict]:
+        ## shift chart: one row per player shift with start/end times
+        ## this is how we reconstruct who was on ice at any given second
+        url = f"{cfg.nhl_api.stats_url}/shiftcharts"
+        data = self._get(url, params={"cayenneExp": f"gameId={game_id}"})
+        return data.get("data", [])
 
     def get_game_roster(self, game_id: int) -> dict:
         ## game-level roster with jersey numbers and positions

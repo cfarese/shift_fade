@@ -41,8 +41,9 @@ def run_season(season: str, limit: int | None = None) -> Path:
 
         for i, gid in enumerate(game_ids):
             try:
-                raw = client.get_play_by_play(gid)
-                parser = PBPParser(game_id=gid, raw=raw)
+                raw    = client.get_play_by_play(gid)
+                shifts = client.get_shifts(gid)
+                parser = PBPParser(game_id=gid, raw=raw, shifts=shifts)
                 stints = parser.parse()
 
                 if stints:
