@@ -35,6 +35,10 @@ def get_line_stats(season: str, min_toi_sec: int = 300) -> pd.DataFrame:
     ## 5v5 only for line analysis
     ev = df[df["strength"] == "5v5"].copy()
 
+    ## parquet reads tuple columns back as numpy arrays which aren't hashable
+    ## convert to tuple of plain ints so groupby works
+    ev["home_skaters"] = ev["home_skaters"].apply(lambda x: tuple(int(i) for i in x))
+
     grouped = (
         ev.groupby("home_skaters")
         .agg(
@@ -64,6 +68,7 @@ def get_line_decay_by_bucket(season: str, skater_combo: tuple[int, ...]) -> pd.D
 
     df = load_stints(season)
     ev = df[df["strength"] == "5v5"].copy()
+    ev["home_skaters"] = ev["home_skaters"].apply(lambda x: tuple(int(i) for i in x))
 
     ## match on home_skaters as a frozenset so ordering doesn't matter
     target = frozenset(skater_combo)
@@ -110,6 +115,7 @@ def get_overused_lines(season: str, min_toi_min: float = 5.0) -> pd.DataFrame:
     stats = get_line_stats(season, min_toi_sec=int(min_toi_min * 60))
     df = load_stints(season)
     ev = df[df["strength"] == "5v5"].copy()
+    ev["home_skaters"] = ev["home_skaters"].apply(lambda x: tuple(int(i) for i in x))
 
     results = []
     for _, row in stats.iterrows():

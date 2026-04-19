@@ -153,7 +153,7 @@ rapm_decay <- data.frame(
   rapm_decay = as.vector(decay_coefs),
   stringsAsFactors = FALSE
 ) %>%
-  mutate(player_id = as.integer(sub("^p_|_decay$", "", col_name))) %>%
+  mutate(player_id = as.integer(gsub("^p_|_decay$", "", col_name))) %>%
   filter(!is.na(player_id))
 
 ## ---------------------------------------------------------------------------

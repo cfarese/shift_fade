@@ -1,15 +1,12 @@
-## Fetches and caches player name/team info from the NHL API.
+## Resolves player IDs to full names and teams.
 ##
-## The RAPM model only knows player IDs. This module resolves them to
-## names and teams so the dashboard can display something readable.
-## Results get cached to a JSON file so we don't re-hit the API every run.
+## Uses rosterSpots from the PBP endpoint (api-web.nhle.com/v1/gamecenter/{id}/play-by-play)
+## which returns full first/last names and team info. Results are cached to
+## data/cache/player_names.json so we don't re-hit the API on every run.
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Optional
-
 from loguru import logger
 
 from config.settings import cfg
@@ -30,35 +27,27 @@ def _save_cache(data: dict[str, dict]) -> None:
 
 def resolve_player_names(player_ids: list[int], game_ids: list[int]) -> dict[int, dict]:
     ## returns {player_id: {"name": "...", "team": "...", "position": "..."}}
-    ## pulls from cache first, only hits API for missing IDs
-
     cache = _load_cache()
     missing = [pid for pid in player_ids if str(pid) not in cache]
 
     if missing:
-        logger.info(f"Resolving {len(missing)} player IDs from API via game rosters")
-        _fill_from_rosters(missing, game_ids, cache)
+        logger.info(f"Resolving {len(missing)} player IDs from PBP rosterSpots")
+        _fill_from_pbp(missing, game_ids, cache)
         _save_cache(cache)
 
     result = {}
     for pid in player_ids:
         entry = cache.get(str(pid))
-        if entry:
-            result[pid] = entry
-        else:
-            ## still missing after API call, use fallback
-            result[pid] = {"name": f"Player_{pid}", "team": "UNK", "position": "UNK"}
+        result[pid] = entry if entry else {"name": f"Player_{pid}", "team": None, "position": None}
 
     return result
 
 
-def _fill_from_rosters(
+def _fill_from_pbp(
     target_ids: list[int],
     game_ids: list[int],
     cache: dict[str, dict],
 ) -> None:
-    ## scan game boxscores until we've found all the target IDs
-    ## stops early once everyone is resolved so we don't pull 1312 games
     remaining = set(target_ids)
 
     with NHLClient() as client:
@@ -66,41 +55,47 @@ def _fill_from_rosters(
             if not remaining:
                 break
             try:
-                boxscore = client.get_game_roster(gid)
-                _parse_boxscore(boxscore, remaining, cache)
+                raw = client.get_play_by_play(gid)
+                _parse_roster_spots(raw, remaining, cache)
             except Exception as e:
-                logger.debug(f"Boxscore fetch failed for game {gid}: {e}")
+                logger.debug(f"PBP fetch failed for game {gid}: {e}")
                 continue
 
     if remaining:
-        logger.warning(f"Could not resolve {len(remaining)} player IDs: {remaining}")
+        logger.warning(f"Could not resolve {len(remaining)} player IDs after scanning all games")
 
 
-def _parse_boxscore(boxscore: dict, remaining: set[int], cache: dict[str, dict]) -> None:
-    ## NHL boxscore has playerByGameStats nested under home/away
+def _parse_roster_spots(raw: dict, remaining: set[int], cache: dict[str, dict]) -> None:
+    ## rosterSpots has teamId, playerId, firstName/lastName, positionCode
+    home_id = raw.get("homeTeam", {}).get("id")
+    away_id = raw.get("awayTeam", {}).get("id")
+
+    ## build a team id -> abbrev map from the response
+    team_abbrev: dict[int, str] = {}
     for side in ("homeTeam", "awayTeam"):
-        team_data = boxscore.get(side, {})
-        team_abbrev = team_data.get("abbrev", "UNK")
+        t = raw.get(side, {})
+        if t.get("id") and t.get("abbrev"):
+            team_abbrev[t["id"]] = t["abbrev"]
 
-        ## forwards, defense, goalies are separate lists
-        for position_group in ("forwards", "defense", "goalies"):
-            for player in team_data.get(position_group, []):
-                pid = player.get("playerId")
-                if pid is None:
-                    continue
-                pid = int(pid)
-                if pid in remaining:
-                    fname = player.get("firstName", {}).get("default", "")
-                    lname = player.get("lastName", {}).get("default", "")
-                    cache[str(pid)] = {
-                        "name": f"{fname} {lname}".strip(),
-                        "team": team_abbrev,
-                        "position": player.get("position", "UNK"),
-                    }
-                    remaining.discard(pid)
+    for spot in raw.get("rosterSpots", []):
+        pid = spot.get("playerId")
+        if pid is None:
+            continue
+        pid = int(pid)
+        if pid not in remaining:
+            continue
+
+        tid    = spot.get("teamId")
+        fname  = spot.get("firstName", {}).get("default", "")
+        lname  = spot.get("lastName",  {}).get("default", "")
+        name   = f"{fname} {lname}".strip()
+        team   = team_abbrev.get(tid, f"T{tid}")
+        pos    = spot.get("positionCode", None)
+
+        cache[str(pid)] = {"name": name, "team": team, "position": pos}
+        remaining.discard(pid)
 
 
 def get_cached_names() -> dict[int, dict]:
-    ## convenience wrapper for when you just want whatever is already on disk
     cache = _load_cache()
     return {int(k): v for k, v in cache.items()}
