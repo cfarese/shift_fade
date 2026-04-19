@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shift Decay RAPM</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'IBM Plex Sans', sans-serif; background: #f8f8f7; color: #111; font-size: 14px; }
+.mono { font-family: 'IBM Plex Mono', monospace; }
+select { font-family: 'IBM Plex Sans', sans-serif; font-size: 13px; border: 1px solid #ddd; border-radius: 4px; padding: 6px 10px; background: #fff; cursor: pointer; outline: none; }
+select:focus { border-color: #1d4ed8; }
+button { font-family: 'IBM Plex Sans', sans-serif; cursor: pointer; border: none; background: none; }
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #f1f1f1; }
+::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+table { border-collapse: collapse; width: 100%; }
+th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #666; padding: 8px 10px; border-bottom: 2px solid #e5e5e5; text-align: right; white-space: nowrap; }
+th:first-child { text-align: left; }
+td { padding: 7px 10px; border-bottom: 1px solid #f0f0f0; font-size: 13px; text-align: right; vertical-align: middle; }
+td:first-child { text-align: left; }
+tr:hover td { background: #fafaf9; }
+</style>
+<!-- Real data injected by server -->
+<script>window.__DATA__ = {{DATA_JSON}};</script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo, useRef, useEffect } = React;
+
+const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
+
+// ── REAL DATA ────────────────────────────────────────────────────────────────
+const AGES = [0,10,20,30,40,50,60,70,80];
+const PLAYERS    = window.__DATA__.players;
+const LINES      = window.__DATA__.lines;
+const LEAGUE_P25 = window.__DATA__.league_p25;
+const LEAGUE_P75 = window.__DATA__.league_p75;
+const LEAGUE_MED = window.__DATA__.league_med;
+const TEAMS      = [...new Set(PLAYERS.map(p=>p.team))].sort();
+const SEASONS    = window.__DATA__.seasons;
+
+// ── UTILS ────────────────────────────────────────────────────────────────────
+function rankField(arr, field, hi=true) {
+  const vals = arr.map(p=>p[field]).sort((a,b)=>a-b);
+  return arr.map(p => {
+    const idx = vals.indexOf(p[field]);
+    const pct = idx/(vals.length-1)*100;
+    return hi ? pct : 100-pct;
+  });
+}
+
+// ── OLS regression ───────────────────────────────────────────────────────────
+function ols(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return {slope:0, intercept:0, r2:0, r:0};
+  const mX = xs.reduce((a,b)=>a+b,0)/n;
+  const mY = ys.reduce((a,b)=>a+b,0)/n;
+  const ssXX = xs.reduce((s,x)=>s+(x-mX)**2, 0);
+  const ssXY = xs.reduce((s,x,i)=>s+(x-mX)*(ys[i]-mY), 0);
+  const ssYY = ys.reduce((s,y)=>s+(y-mY)**2, 0);
+  const slope = ssXX > 0 ? ssXY/ssXX : 0;
+  const intercept = mY - slope*mX;
+  const r2 = (ssXX > 0 && ssYY > 0) ? ssXY**2/(ssXX*ssYY) : 0;
+  const r  = (ssXX > 0 && ssYY > 0) ? ssXY/Math.sqrt(ssXX*ssYY) : 0;
+  return {slope, intercept, r2, r};
+}
+
+const lerp = (a,b,t) => a+(b-a)*t;
+function pctBg(pct) {
+  const t = clamp(pct,0,100)/100;
+  if (t<0.5) { const s=t*2; return `rgb(${Math.round(lerp(214,255,s))},${Math.round(lerp(40,255,s))},${Math.round(lerp(40,255,s))})`; }
+  const s=(t-0.5)*2;
+  return `rgb(${Math.round(lerp(255,29,s))},${Math.round(lerp(255,100,s))},${Math.round(lerp(255,220,s))})`;
+}
+function pctFg(pct) { return (pct<18||pct>82)?'#fff':'#222'; }
+const fmt = (v,d=2) => v==null?'—':(v>0?'+':'')+Number(v).toFixed(d);
+const fmtNoSign = (v,d=2) => v==null?'—':Number(v).toFixed(d);
+const fmtBreak = (v) => v==null?'Never':v>200?'>200s':v+'s';
+const overuseCount = PLAYERS.filter(p=>p.flagged).length;
+const avgDecay = (PLAYERS.reduce((s,p)=>s+p.decay_coef,0)/PLAYERS.length);
+const medBreak = PLAYERS.filter(p=>p.breakeven!=null).map(p=>p.breakeven).sort((a,b)=>a-b);
+
+// ── SHARED COMPONENTS ────────────────────────────────────────────────────────
+const KPICard = ({label, value, sub, accent}) => (
+  <div style={{padding:'20px 24px', background:'#fff', border:'1px solid #e8e8e8', borderRadius:6, borderTop: accent?`3px solid ${accent}`:'3px solid transparent'}}>
+    <div style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.07em',color:'#888',marginBottom:8}}>{label}</div>
+    <div style={{fontSize:28,fontWeight:700,letterSpacing:'-0.02em',fontFamily:'IBM Plex Mono'}}>{value}</div>
+    {sub && <div style={{fontSize:11,color:'#999',marginTop:4}}>{sub}</div>}
+  </div>
+);
+
+const PctCell = ({pct, value, bold}) => (
+  <td style={{background:pctBg(pct), color:pctFg(pct), fontFamily:'IBM Plex Mono', fontSize:12, fontWeight:bold?600:400}}>
+    {value}
+  </td>
+);
+
+const PctBadge = ({pct, label}) => (
+  <div style={{textAlign:'center'}}>
+    <div style={{display:'inline-block', background:pctBg(pct), color:pctFg(pct), borderRadius:4, padding:'4px 10px', fontFamily:'IBM Plex Mono', fontSize:13, fontWeight:600, minWidth:52}}>{pct}<span style={{fontSize:10,fontWeight:400}}>th</span></div>
+    <div style={{fontSize:11,color:'#888',marginTop:4,fontWeight:500}}>{label}</div>
+  </div>
+);
+
+const Tag = ({children, color='#666', bg='#f0f0f0'}) => (
+  <span style={{fontSize:11,fontWeight:600,padding:'2px 7px',background:bg,color,borderRadius:3,letterSpacing:'0.04em'}}>{children}</span>
+);
+
+const SectionHeader = ({title, sub}) => (
+  <div style={{marginBottom:16}}>
+    <div style={{fontSize:16,fontWeight:700,letterSpacing:'-0.01em'}}>{title}</div>
+    {sub && <div style={{fontSize:12,color:'#888',marginTop:3,fontStyle:'italic'}}>{sub}</div>}
+  </div>
+);
+
+// ── NAV ──────────────────────────────────────────────────────────────────────
+const NAV_PAGES = ['overview','players','lines','team'];
+const NAV_LABELS = {overview:'Overview',players:'Players',lines:'Lines',team:'Team Report'};
+
+function seasonLabel(s) {
+  // "20232024" -> "2023-24"
+  if (s && s.length === 8) return s.slice(0,4) + '–' + s.slice(6);
+  return s;
+}
+
+const TopNav = ({page,setPage,season,onSeasonChange,breadcrumb}) => (
+  <div style={{background:'#fff',borderBottom:'1px solid #e5e5e5',position:'sticky',top:0,zIndex:100}}>
+    <div style={{maxWidth:1200,margin:'0 auto',padding:'0 24px',display:'flex',alignItems:'center',gap:0,height:52}}>
+      <div style={{fontWeight:700,fontSize:14,letterSpacing:'-0.01em',marginRight:32,color:'#111',whiteSpace:'nowrap'}}>
+        <span style={{color:'#1d4ed8'}}>⬡</span> Shift Decay RAPM
+      </div>
+      {NAV_PAGES.map(p=>(
+        <button key={p} onClick={()=>setPage(p)} style={{
+          padding:'0 16px',height:52,fontSize:13,fontWeight:600,
+          color:page===p?'#1d4ed8':'#555',
+          borderBottom:page===p?'2px solid #1d4ed8':'2px solid transparent',
+          transition:'all .15s',letterSpacing:'0.01em'
+        }}>{NAV_LABELS[p]}</button>
+      ))}
+      <div style={{flex:1}}/>
+      <select value={season} onChange={e=>onSeasonChange(e.target.value)} style={{fontSize:12}}>
+        {SEASONS.map(s=><option key={s} value={s}>{seasonLabel(s)}</option>)}
+      </select>
+    </div>
+    {breadcrumb && (
+      <div style={{maxWidth:1200,margin:'0 auto',padding:'6px 24px',background:'#fafaf9',borderTop:'1px solid #f0f0f0',fontSize:12,color:'#888',display:'flex',alignItems:'center',gap:6}}>
+        {breadcrumb.map((b,i)=>(
+          <React.Fragment key={i}>
+            {i>0&&<span style={{color:'#ccc'}}>/</span>}
+            {b.onClick
+              ? <button onClick={b.onClick} style={{color:'#1d4ed8',fontWeight:500,fontSize:12}}>{b.label}</button>
+              : <span style={{color:i===breadcrumb.length-1?'#333':'#888',fontWeight:i===breadcrumb.length-1?600:400}}>{b.label}</span>}
+          </React.Fragment>
+        ))}
+      </div>
+    )}
+  </div>
+);
+
+// ── DECAY CURVE CHART ─────────────────────────────────────────────────────────
+const DecayCurveChart = ({player, width=600, height=240}) => {
+  const m = {top:18,right:24,bottom:44,left:52};
+  const W = width-m.left-m.right, H = height-m.top-m.bottom;
+  const allV = [...LEAGUE_P25,...LEAGUE_P75,...(player?player.obs:[])];
+  const yMin = Math.floor(Math.min(...allV)-0.5), yMax = Math.ceil(Math.max(...allV)+0.5);
+  const xS = t => (t/80)*W;
+  const yS = v => H - ((v-yMin)/(yMax-yMin))*H;
+  const pathOf = pts => pts.map((v,i)=>`${i?'L':'M'} ${xS(AGES[i])} ${yS(v)}`).join(' ');
+  const bandPath = [
+    ...LEAGUE_P75.map((v,i)=>`${i?'L':'M'} ${xS(AGES[i])} ${yS(v)}`),
+    ...LEAGUE_P25.slice().reverse().map((v,i)=>`L ${xS(AGES[AGES.length-1-i])} ${yS(v)}`),
+    'Z'
+  ].join(' ');
+  const yTicks = [];
+  for(let v=Math.ceil(yMin); v<=yMax; v+=2) yTicks.push(v);
+  const avgShift = 45;
+  return (
+    <svg width={width} height={height} style={{display:'block',overflow:'visible'}}>
+      <g transform={`translate(${m.left},${m.top})`}>
+        <path d={bandPath} fill="#e2eaf6" opacity="0.7"/>
+        <path d={pathOf(LEAGUE_MED)} stroke="#aab" strokeWidth="1.5" strokeDasharray="5 3" fill="none"/>
+        <line x1={xS(avgShift)} y1={0} x2={xS(avgShift)} y2={H} stroke="#bbb" strokeDasharray="3 2" strokeWidth="1"/>
+        <text x={xS(avgShift)+4} y={12} fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">avg shift</text>
+        <line x1={0} y1={yS(0)} x2={W} y2={yS(0)} stroke="#ddd" strokeWidth="1"/>
+        {yTicks.map(v=>(
+          <g key={v}>
+            <line x1={0} y1={yS(v)} x2={W} y2={yS(v)} stroke="#f0f0f0" strokeWidth="1"/>
+            <text x={-8} y={yS(v)+4} textAnchor="end" fontSize="11" fill="#999" fontFamily="IBM Plex Mono">{v}</text>
+          </g>
+        ))}
+        {AGES.map((t,i)=>(
+          <text key={i} x={xS(t)} y={H+20} textAnchor="middle" fontSize="11" fill="#999" fontFamily="IBM Plex Mono">{t}</text>
+        ))}
+        <text x={W/2} y={H+38} textAnchor="middle" fontSize="12" fill="#777">Shift age (seconds)</text>
+        <text x={-36} y={H/2} textAnchor="middle" fontSize="12" fill="#777" transform={`rotate(-90,-36,${H/2})`}>xGD/60</text>
+        {player && <>
+          <path d={pathOf(player.obs)} stroke="#1d4ed8" strokeWidth="2.5" fill="none" strokeLinejoin="round"/>
+          {AGES.map((t,i)=>(
+            <circle key={i} cx={xS(t)} cy={yS(player.obs[i])} r="4" fill="#1d4ed8" stroke="#fff" strokeWidth="1.5"/>
+          ))}
+        </>}
+        {/* Legend */}
+        <g transform={`translate(${W-160},${H+26})`}>
+          <rect x="0" y="-6" width="12" height="12" fill="#e2eaf6" rx="2"/>
+          <text x="16" y="4" fontSize="10" fill="#888">P25–P75 league</text>
+          <line x1="90" y1="0" x2="102" y2="0" stroke="#aab" strokeWidth="1.5" strokeDasharray="4 2"/>
+          <text x="106" y="4" fontSize="10" fill="#888">median</text>
+        </g>
+      </g>
+    </svg>
+  );
+};
+
+// ── HISTOGRAM (decay coef distribution) ──────────────────────────────────────
+const Histogram = ({players, width=360, height=190}) => {
+  const m = {top:12,right:12,bottom:36,left:36};
+  const W = width-m.left-m.right, H = height-m.top-m.bottom;
+  const vals = players.map(p=>p.decay_coef);
+  const min=-0.0008, max=0.0005, bins=14;
+  const step=(max-min)/bins;
+  const counts = Array(bins).fill(0);
+  vals.forEach(v=>{ const i=Math.min(bins-1,Math.floor((v-min)/step)); if(i>=0) counts[i]++; });
+  const maxC=Math.max(...counts);
+  const xS=i=>(i/bins)*W, yS=c=>H-(c/maxC)*H;
+  const barW=W/bins-1;
+  const pcts = counts.map((_,i)=>((min+(i+0.5)*step-min)/(max-min)*100));
+  return (
+    <svg width={width} height={height}>
+      <g transform={`translate(${m.left},${m.top})`}>
+        <line x1={0} y1={H} x2={W} y2={H} stroke="#ddd"/>
+        {counts.map((c,i)=>(
+          <rect key={i} x={xS(i)+0.5} y={yS(c)} width={barW} height={H-yS(c)} fill={pctBg(pcts[i])} opacity="0.9"/>
+        ))}
+        {/* zero line */}
+        <line x1={((-min)/(max-min))*W} y1={0} x2={((-min)/(max-min))*W} y2={H+4} stroke="#c00" strokeWidth="1.5" strokeDasharray="4 2"/>
+        <text x={((-min)/(max-min))*W} y={H+16} textAnchor="middle" fontSize="10" fill="#c00" fontFamily="IBM Plex Mono">0</text>
+        {[-0.0006,-0.0003,0,0.0003].map((v,i)=>(
+          <text key={i} x={((v-min)/(max-min))*W} y={H+28} textAnchor="middle" fontSize="10" fill="#999" fontFamily="IBM Plex Mono">{v.toFixed(4)}</text>
+        ))}
+        {[0,Math.round(maxC/2),maxC].map((c,i)=>(
+          <text key={i} x={-4} y={yS(c)+4} textAnchor="end" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{c}</text>
+        ))}
+      </g>
+    </svg>
+  );
+};
+
+// ── SCATTER (Base RAPM vs Decay) ──────────────────────────────────────────────
+const ScatterPlot = ({players, onSelect, reg, width=360, height=190}) => {
+  const m = {top:12,right:12,bottom:36,left:44};
+  const W=width-m.left-m.right, H=height-m.top-m.bottom;
+  const xs=players.map(p=>p.decay_coef), ys=players.map(p=>p.base_rapm);
+  const xMin=Math.min(...xs)-0.00005, xMax=Math.max(...xs)+0.00005;
+  const yMin=Math.min(...ys)-0.005, yMax=Math.max(...ys)+0.005;
+  const xS=v=>((v-xMin)/(xMax-xMin))*W;
+  const yS=v=>H-((v-yMin)/(yMax-yMin))*H;
+  // clip regression line y-values to chart bounds, then map to SVG
+  const rl_y1 = reg.slope*xMin + reg.intercept;
+  const rl_y2 = reg.slope*xMax + reg.intercept;
+  return (
+    <svg width={width} height={height} style={{cursor:'crosshair'}}>
+      <g transform={`translate(${m.left},${m.top})`}>
+        <line x1={0} y1={yS(0)} x2={W} y2={yS(0)} stroke="#eee"/>
+        <line x1={xS(0)} y1={0} x2={xS(0)} y2={H} stroke="#ddd" strokeDasharray="4 2"/>
+        {/* OLS trend line */}
+        <line x1={xS(xMin)} y1={yS(rl_y1)} x2={xS(xMax)} y2={yS(rl_y2)}
+          stroke="#8b5cf6" strokeWidth="1.8" strokeDasharray="6 3" opacity="0.85"/>
+        {players.map(p=>(
+          <circle key={p.id} cx={xS(p.decay_coef)} cy={yS(p.base_rapm)} r="5"
+            fill={p.flagged?'#dc2626':'#1d4ed8'} opacity="0.7" stroke="#fff" strokeWidth="1"
+            onClick={()=>onSelect(p)} style={{cursor:'pointer'}}>
+            <title>{p.name} ({p.team}){'\n'}Base RAPM: {p.base_rapm}{'\n'}Decay: {p.decay_coef}</title>
+          </circle>
+        ))}
+        {[-0.0006,-0.0003,0,0.0003].map((v,i)=>(
+          <text key={i} x={xS(v)} y={H+20} textAnchor="middle" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{v.toFixed(4)}</text>
+        ))}
+        <text x={W/2} y={H+34} textAnchor="middle" fontSize="11" fill="#777">Decay coefficient</text>
+        <text x={-32} y={H/2} textAnchor="middle" fontSize="11" fill="#777" transform={`rotate(-90,-32,${H/2})`}>Base RAPM</text>
+        {/* R² badge top-right */}
+        <text x={W} y={13} textAnchor="end" fontSize="10" fill="#8b5cf6" fontFamily="IBM Plex Mono" fontWeight="600">R²={reg.r2.toFixed(3)}</text>
+        <g transform={`translate(4,4)`}>
+          <circle cx="5" cy="5" r="4" fill="#dc2626" opacity="0.8"/>
+          <text x="13" y="9" fontSize="10" fill="#666">Flagged</text>
+          <circle cx="5" cy="20" r="4" fill="#1d4ed8" opacity="0.7"/>
+          <text x="13" y="24" fontSize="10" fill="#666">Normal</text>
+          <line x1="0" y1="35" x2="10" y2="35" stroke="#8b5cf6" strokeWidth="1.8" strokeDasharray="4 2"/>
+          <text x="13" y="39" fontSize="10" fill="#8b5cf6">OLS trend</text>
+        </g>
+      </g>
+    </svg>
+  );
+};
+
+// ── OVERVIEW PAGE ─────────────────────────────────────────────────────────────
+const OverviewPage = ({setPage, setSelectedPlayer}) => {
+  const sorted_decay = [...PLAYERS].sort((a,b)=>a.decay_coef-b.decay_coef).slice(0,12);
+  const sorted_rapm  = [...PLAYERS].sort((a,b)=>b.base_rapm-a.base_rapm).slice(0,10);
+  const medBE = medBreak.length?medBreak[Math.floor(medBreak.length/2)]:null;
+
+  const openPlayer = (p) => { setSelectedPlayer(p); setPage('profile'); };
+
+  return (
+    <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 24px'}}>
+      <div style={{marginBottom:28}}>
+        <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:4}}>League Overview</h1>
+        <p style={{fontSize:13,color:'#888'}}>Shift-age decay analysis across all skaters · 5v5</p>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:36}}>
+        <KPICard label="Players in sample" value={PLAYERS.length} accent="#1d4ed8"/>
+        <KPICard label="Overuse flags" value={overuseCount} accent={overuseCount>0?'#dc2626':'#16a34a'} sub={`decay < −0.00035, min 50 min TOI`}/>
+        <KPICard label="Avg decay coef" value={avgDecay.toFixed(6)} accent="#8b5cf6" sub="negative = worsens with shift age"/>
+        <KPICard label="Median break-even" value={fmtBreak(medBE)} accent="#0891b2"/>
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:24,marginBottom:36}}>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px 20px 12px'}}>
+          <SectionHeader title="Distribution of Decay Coefficients" sub="Each bar = players in that decay range. Red bars = fastest decay."/>
+          <Histogram players={PLAYERS} width={420} height={190}/>
+        </div>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px 20px 12px'}}>
+          <SectionHeader title="Base RAPM vs. Decay Rate" sub="Click a dot to open the player profile. Red = overuse-flagged. Purple line = OLS trend."/>
+          {(() => {
+            const xs = PLAYERS.map(p=>p.decay_coef);
+            const ys = PLAYERS.map(p=>p.base_rapm);
+            const reg = ols(xs, ys);
+            return <>
+              <ScatterPlot players={PLAYERS} onSelect={openPlayer} reg={reg} width={420} height={190}/>
+              <div style={{marginTop:8,padding:'7px 10px',background:'#faf9ff',border:'1px solid #e9d5ff',borderRadius:4,fontSize:11,color:'#6b21a8',display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                <span style={{fontFamily:'IBM Plex Mono',fontWeight:600}}>r = {reg.r>=0?'+':''}{reg.r.toFixed(3)}</span>
+                <span style={{color:'#c4b5fd'}}>·</span>
+                <span style={{fontFamily:'IBM Plex Mono',fontWeight:600}}>R² = {reg.r2.toFixed(3)}</span>
+                <span style={{color:'#c4b5fd'}}>·</span>
+                <span>{reg.r < 0 ? 'Higher decay (more negative) correlates with lower base RAPM — durable players tend to be better.' : 'Higher base RAPM correlates with higher decay rate.'}</span>
+              </div>
+            </>;
+          })()}
+        </div>
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:24}}>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+          <SectionHeader title="Most Overused Players" sub="Fastest decay, minimum 50 min TOI. Click name to view profile."/>
+          <table>
+            <thead><tr>
+              <th style={{textAlign:'left'}}>Player</th><th>Team</th><th>Base RAPM</th><th>Decay</th><th>TOI</th><th>Break-even</th>
+            </tr></thead>
+            <tbody>{sorted_decay.map(p=>(
+              <tr key={p.id}>
+                <td><button onClick={()=>openPlayer(p)} style={{color:'#1d4ed8',fontWeight:600,fontSize:13,textAlign:'left'}}>{p.name}</button></td>
+                <td style={{textAlign:'center'}}><Tag>{p.team}</Tag></td>
+                <PctCell pct={p.pct_rapm} value={fmt(p.base_rapm,4)}/>
+                <PctCell pct={p.pct_decay} value={p.decay_coef.toFixed(6)}/>
+                <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{p.toi_min}</td>
+                <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{fmtBreak(p.breakeven)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+          <SectionHeader title="Top Performers by Base RAPM" sub="Best baseline value regardless of decay."/>
+          <table>
+            <thead><tr>
+              <th style={{textAlign:'left'}}>Player</th><th>Pos</th><th>Base RAPM</th><th>Early xGD</th><th>Late xGD</th><th>TOI</th>
+            </tr></thead>
+            <tbody>{sorted_rapm.map(p=>(
+              <tr key={p.id}>
+                <td><button onClick={()=>openPlayer(p)} style={{color:'#1d4ed8',fontWeight:600,fontSize:13}}>{p.name}</button></td>
+                <td style={{textAlign:'center',color:'#888',fontSize:12}}>{p.pos}</td>
+                <PctCell pct={p.pct_rapm} value={fmt(p.base_rapm,4)}/>
+                <PctCell pct={p.pct_early} value={fmt(p.early)}/>
+                <PctCell pct={p.pct_late} value={fmt(p.late)}/>
+                <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{p.toi_min}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── PLAYERS PAGE ──────────────────────────────────────────────────────────────
+const PlayersPage = ({setPage, setSelectedPlayer, selectedPlayer}) => {
+  const [pid, setPid] = useState(selectedPlayer?.id ?? PLAYERS[0]?.id ?? 0);
+  const [teamFilter, setTeamFilter] = useState('All');
+  const [tab, setTab] = useState('observed');
+  const player = PLAYERS.find(p=>p.id===pid)||PLAYERS[0];
+  const filtered = teamFilter==='All'?PLAYERS:PLAYERS.filter(p=>p.team===teamFilter);
+  const bigDrops = [...PLAYERS].sort((a,b)=>a.drop-b.drop).slice(0,15);
+
+  // RAPM model curve
+  const rapmObs = AGES.map(t => +(player.base_rapm*42 + player.decay_coef*t*42).toFixed(2));
+  const rapmPlayer = {...player, obs: rapmObs};
+
+  return (
+    <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 24px'}}>
+      <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:20}}>Player Shift-Decay Profiles</h1>
+      <div style={{display:'flex',gap:12,marginBottom:20,alignItems:'center'}}>
+        <select value={pid} onChange={e=>setPid(+e.target.value)} style={{minWidth:200}}>
+          {filtered.map(p=><option key={p.id} value={p.id}>{p.name} ({p.team})</option>)}
+        </select>
+        <select value={teamFilter} onChange={e=>{setTeamFilter(e.target.value);}}>
+          <option value="All">All teams</option>
+          {TEAMS.map(t=><option key={t} value={t}>{t}</option>)}
+        </select>
+        <button onClick={()=>{setSelectedPlayer(player);setPage('profile');}}
+          style={{marginLeft:'auto',padding:'7px 16px',background:'#1d4ed8',color:'#fff',borderRadius:4,fontSize:13,fontWeight:600}}>
+          Open Full Profile →
+        </button>
+      </div>
+
+      <div style={{display:'flex',gap:2,marginBottom:20,borderBottom:'2px solid #e5e5e5'}}>
+        {[['observed','Observed Decay'],['rapm','RAPM Model']].map(([k,l])=>(
+          <button key={k} onClick={()=>setTab(k)} style={{padding:'10px 18px',fontSize:13,fontWeight:600,color:tab===k?'#1d4ed8':'#777',borderBottom:tab===k?'2px solid #1d4ed8':'2px solid transparent',marginBottom:-2}}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 300px',gap:24}}>
+        <div>
+          <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+            <SectionHeader
+              title={tab==='observed'?'On-Ice xGD/60 by Shift Age':'Projected xGD/60 — RAPM Model'}
+              sub={tab==='observed'
+                ?'Observed; each bucket = stints where shift was that old. Shaded band = P25–P75 league range.'
+                :'Smoothed ridge-regression model. Fewer games → coefficients shrink toward zero.'}/>
+            <DecayCurveChart player={tab==='observed'?player:rapmPlayer} width={620} height={240}/>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginTop:16}}>
+              {[['Early xGD/60 (0–30s)', fmt(player.early), player.pct_early],
+                ['Late xGD/60 (45s+)', fmt(player.late), player.pct_late],
+                ['Early-to-late drop', fmt(player.drop), player.pct_drop]
+              ].map(([lbl,val,pct])=>(
+                <div key={lbl} style={{background:'#fafaf9',borderRadius:5,padding:'12px 14px',border:'1px solid #eee'}}>
+                  <div style={{fontSize:11,fontWeight:600,color:'#888',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:6}}>{lbl}</div>
+                  <div style={{fontSize:22,fontWeight:700,fontFamily:'IBM Plex Mono',letterSpacing:'-0.02em'}}>{val}</div>
+                  <div style={{marginTop:8,display:'inline-block',background:pctBg(pct),color:pctFg(pct),borderRadius:3,padding:'2px 8px',fontSize:11,fontWeight:600,fontFamily:'IBM Plex Mono'}}>{Math.round(pct)}th pct</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {tab==='rapm' && (
+            <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px',marginTop:16,display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:16}}>
+              {[['Base RAPM',fmt(player.base_rapm,4),'Higher = better baseline value'],
+                ['Decay coef',player.decay_coef.toFixed(6),'Negative = performance drops over shift'],
+                ['Break-even',fmtBreak(player.breakeven),'Shift length where model hits zero']
+              ].map(([l,v,s])=>(
+                <div key={l}><div style={{fontSize:11,fontWeight:600,color:'#888',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:4}}>{l}</div>
+                  <div style={{fontSize:22,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{v}</div>
+                  <div style={{fontSize:11,color:'#aaa',marginTop:4}}>{s}</div></div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'16px'}}>
+          <div style={{fontSize:12,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:12}}>Biggest Early→Late Drops</div>
+          <div style={{fontSize:11,color:'#aaa',marginBottom:10}}>Min 30 min TOI. Click to load.</div>
+          {bigDrops.map(p=>(
+            <button key={p.id} onClick={()=>setPid(p.id)} style={{
+              width:'100%',padding:'8px 10px',textAlign:'left',borderRadius:4,display:'flex',justifyContent:'space-between',alignItems:'center',
+              background:pid===p.id?'#eff6ff':'transparent',borderLeft:pid===p.id?'3px solid #1d4ed8':'3px solid transparent'
+            }}>
+              <div>
+                <div style={{fontSize:12,fontWeight:600,color:'#111'}}>{p.name}</div>
+                <div style={{fontSize:11,color:'#999'}}>{p.team} · Early {fmt(p.early,1)} → Late {fmt(p.late,1)}</div>
+              </div>
+              <div style={{background:pctBg(p.pct_drop),color:pctFg(p.pct_drop),borderRadius:3,padding:'2px 7px',fontSize:11,fontWeight:600,fontFamily:'IBM Plex Mono'}}>
+                {fmt(p.drop,1)}
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── PLAYER PROFILE ────────────────────────────────────────────────────────────
+const PlayerProfile = ({player, setPage}) => {
+  if (!player) return <div style={{padding:40,color:'#888'}}>No player selected.</div>;
+  const shiftData = AGES.map((t,i)=>({age:t, xgd:player.obs[i], toi: +(player.toi_min/AGES.length).toFixed(2), stints:Math.round(player.stints/AGES.length)}));
+  return (
+    <div style={{maxWidth:1100,margin:'0 auto',padding:'32px 24px'}}>
+      <div style={{marginBottom:24}}>
+        <h1 style={{fontSize:32,fontWeight:700,letterSpacing:'-0.025em'}}>{player.name}</h1>
+        <div style={{fontSize:13,color:'#888',marginTop:4,display:'flex',gap:10,alignItems:'center'}}>
+          <Tag bg="#f0f4ff" color="#1d4ed8">{player.team}</Tag>
+          <span>{player.pos}</span><span>·</span><span>5v5</span>
+          {player.flagged && <Tag bg="#fee2e2" color="#dc2626">⚠ Overuse Flagged</Tag>}
+        </div>
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 200px',gap:24,marginBottom:24}}>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+          <SectionHeader title="On-Ice xGD/60 by Shift Age" sub="Observed, not modeled. Each bucket = stints where shift was that old. Shaded = P25–P75 of all skaters."/>
+          <DecayCurveChart player={player} width={680} height={240}/>
+        </div>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+          <div style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:16}}>Shift Breakdown</div>
+          {[['Fresh (0–30s)',fmt(player.early)],['Mid (30–45s)',fmt(+(player.obs[3]+player.obs[4]).toFixed(2)/2)],
+            ['Late (45s+)',fmt(player.late)],['Early-to-late drop',fmt(player.drop)]
+          ].map(([l,v])=>(
+            <div key={l} style={{marginBottom:16}}>
+              <div style={{fontSize:11,color:'#999',marginBottom:2}}>{l}</div>
+              <div style={{fontSize:22,fontWeight:700,fontFamily:'IBM Plex Mono',letterSpacing:'-0.02em'}}>{v}</div>
+            </div>
+          ))}
+          <hr style={{border:'none',borderTop:'1px solid #f0f0f0',margin:'12px 0'}}/>
+          <div style={{marginBottom:12}}>
+            <div style={{fontSize:11,color:'#999',marginBottom:2}}>Total 5v5 TOI</div>
+            <div style={{fontSize:22,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{player.toi_min} <span style={{fontSize:14,fontWeight:400}}>min</span></div>
+          </div>
+          <div>
+            <div style={{fontSize:11,color:'#999',marginBottom:2}}>Total stints</div>
+            <div style={{fontSize:22,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{player.stints}</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:20}}>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+          <div style={{fontSize:12,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:16}}>Context vs. League</div>
+          <div style={{display:'flex',gap:20}}>
+            <PctBadge pct={player.pct_early} label="Early xGD/60"/>
+            <PctBadge pct={player.pct_late} label="Late xGD/60"/>
+            <PctBadge pct={player.pct_drop} label="Durability"/>
+            <PctBadge pct={player.pct_rapm} label="Base RAPM"/>
+          </div>
+        </div>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+          <div style={{fontSize:12,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:16}}>RAPM Model (Ridge Regression)</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12}}>
+            {[['Base RAPM',fmt(player.base_rapm,4)],['Decay coef',player.decay_coef.toFixed(6)],['Break-even',fmtBreak(player.breakeven)]].map(([l,v])=>(
+              <div key={l}><div style={{fontSize:11,color:'#999',marginBottom:2}}>{l}</div>
+                <div style={{fontSize:18,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{v}</div></div>
+            ))}
+          </div>
+          <div style={{fontSize:11,color:'#aaa',marginTop:10,fontStyle:'italic'}}>Coefficients near zero = model needs more data (300+ games).</div>
+        </div>
+      </div>
+
+      <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+        <SectionHeader title="Shift-Age Breakdown Table"/>
+        <table>
+          <thead><tr><th style={{textAlign:'left'}}>Shift age (s)</th><th>xGD/60</th><th>TOI (min)</th><th>Stints</th></tr></thead>
+          <tbody>{shiftData.map(r=>(
+            <tr key={r.age}>
+              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{r.age}</td>
+              <PctCell pct={rankField([...shiftData.map((d,i)=>({id:i,v:d.xgd})),{id:99,v:r.xgd}],'v',true)[shiftData.findIndex(d=>d.age===r.age)]} value={fmt(r.xgd)}/>
+              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{r.toi}</td>
+              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{r.stints}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// ── LINES PAGE ────────────────────────────────────────────────────────────────
+const LinesPage = () => {
+  const [tab, setTab] = useState('top');
+  const [teamFilter, setTeamFilter] = useState('All');
+  const filtered = (teamFilter==='All'?LINES:LINES.filter(l=>l.team===teamFilter));
+  const topLines = [...filtered].sort((a,b)=>b.xgd60-a.xgd60);
+  const overuse  = [...filtered].filter(l=>l.flagged).sort((a,b)=>a.decay-b.decay);
+  const rows = tab==='top'?topLines:overuse;
+
+  const xgdPcts = LINES.map(l=>l.xgd60).sort((a,b)=>a-b);
+  const getXgdPct = v => Math.round(xgdPcts.indexOf(xgdPcts.find(x=>x>=v))/(xgdPcts.length-1)*100);
+  const decayPcts = LINES.map(l=>l.decay).sort((a,b)=>a-b);
+  const getDecPct = v => Math.round(100-decayPcts.indexOf(decayPcts.find(x=>x>=v))/(decayPcts.length-1)*100);
+
+  return (
+    <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 24px'}}>
+      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:20}}>
+        <div>
+          <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:4}}>Line Combination Analysis</h1>
+          <p style={{fontSize:13,color:'#888'}}>5v5 line-combination stats by shift-age window</p>
+        </div>
+        <select value={teamFilter} onChange={e=>setTeamFilter(e.target.value)}>
+          <option value="All">All teams</option>
+          {TEAMS.map(t=><option key={t} value={t}>{t}</option>)}
+        </select>
+      </div>
+
+      <div style={{display:'flex',gap:2,marginBottom:20,borderBottom:'2px solid #e5e5e5'}}>
+        {[['top','Top Lines'],['overuse','Overuse Report']].map(([k,l])=>(
+          <button key={k} onClick={()=>setTab(k)} style={{padding:'10px 18px',fontSize:13,fontWeight:600,
+            color:tab===k?'#1d4ed8':'#777',borderBottom:tab===k?'2px solid #1d4ed8':'2px solid transparent',marginBottom:-2}}>
+            {l}{k==='overuse'&&<span style={{marginLeft:6,background:'#fee2e2',color:'#dc2626',borderRadius:10,padding:'1px 7px',fontSize:11,fontWeight:700}}>{overuse.length}</span>}
+          </button>
+        ))}
+      </div>
+
+      {tab==='overuse' && (
+        <div style={{background:'#fff5f5',border:'1px solid #fecaca',borderRadius:5,padding:'10px 14px',marginBottom:16,fontSize:13,color:'#991b1b',fontWeight:500}}>
+          {overuse.length} line combinations flagged — early-to-late drop exceeds 1.0 xGD/60
+        </div>
+      )}
+
+      <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6}}>
+        <table>
+          <thead><tr>
+            <th style={{textAlign:'left',paddingLeft:16,minWidth:300}}>Line</th>
+            <th>Team</th><th>TOI (min)</th><th>xGD/60</th><th>xGF%</th><th>CF%</th><th>Avg Shift (s)</th>
+            {tab==='overuse'&&<><th>Early xGD</th><th>Late xGD</th><th>Decay</th></>}
+            <th>Stints</th>
+          </tr></thead>
+          <tbody>{rows.map((l,i)=>(
+            <tr key={i} style={{background:l.flagged&&tab==='top'?'#fff8f8':''}}>
+              <td style={{paddingLeft:16,maxWidth:320}}>
+                <div style={{fontSize:12,color:'#333',lineHeight:1.4,textWrap:'pretty'}}>{l.players}</div>
+              </td>
+              <td style={{textAlign:'center'}}><Tag>{l.team}</Tag></td>
+              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{l.toi_min}</td>
+              <PctCell pct={getXgdPct(l.xgd60)} value={fmt(l.xgd60)} bold/>
+              <PctCell pct={Math.round((l.xgf-40)/20*100)} value={fmtNoSign(l.xgf,1)}/>
+              <PctCell pct={Math.round((l.cf-40)/20*100)} value={fmtNoSign(l.cf,1)}/>
+              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{l.avg_shift}</td>
+              {tab==='overuse'&&<>
+                <PctCell pct={getXgdPct(l.early_xgd)} value={fmt(l.early_xgd,1)}/>
+                <PctCell pct={getXgdPct(l.late_xgd)} value={fmt(l.late_xgd,1)}/>
+                <PctCell pct={getDecPct(l.decay)} value={fmt(l.decay,1)} bold/>
+              </>}
+              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{l.stints}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// ── TEAM REPORT ───────────────────────────────────────────────────────────────
+const TeamReportPage = ({setPage,setSelectedPlayer}) => {
+  const [team, setTeam] = useState(TEAMS[0]||'');
+  const roster = PLAYERS.filter(p=>p.team===team).sort((a,b)=>b.toi_min-a.toi_min);
+  const flags = roster.filter(p=>p.flagged).length;
+  const avgD = roster.length?(roster.reduce((s,p)=>s+p.decay_coef,0)/roster.length).toFixed(6):'N/A';
+  const breaks = roster.filter(p=>p.breakeven!=null).map(p=>p.breakeven).sort((a,b)=>a-b);
+  const medB = breaks.length?fmtBreak(breaks[Math.floor(breaks.length/2)]):'N/A';
+
+  // Overlay chart for all players on team
+  const m={top:14,right:20,bottom:40,left:52};
+  const W=560, H=200, cW=W-m.left-m.right, cH=H-m.top-m.bottom;
+  const allObs = roster.flatMap(p=>p.obs);
+  const yMin=Math.floor(Math.min(...(allObs.length?allObs:[0]),LEAGUE_P25[0])-0.5);
+  const yMax=Math.ceil(Math.max(...(allObs.length?allObs:[0]),LEAGUE_P75[0])+0.5);
+  const xS=t=>(t/80)*cW, yS=v=>cH-((v-yMin)/(yMax-yMin))*cH;
+  const yTicks=[]; for(let v=Math.ceil(yMin);v<=yMax;v+=2)yTicks.push(v);
+
+  const bandPath = [
+    ...LEAGUE_P75.map((v,i)=>`${i?'L':'M'} ${xS(AGES[i])} ${yS(v)}`),
+    ...LEAGUE_P25.slice().reverse().map((v,i)=>`L ${xS(AGES[AGES.length-1-i])} ${yS(v)}`),
+    'Z'
+  ].join(' ');
+
+  return (
+    <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 24px'}}>
+      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:24}}>
+        <div>
+          <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:4}}>Team Deployment Report</h1>
+          <p style={{fontSize:13,color:'#888'}}>Shift-decay profiles for a single team's skaters</p>
+        </div>
+        <select value={team} onChange={e=>setTeam(e.target.value)} style={{minWidth:120}}>
+          {TEAMS.map(t=><option key={t} value={t}>{t}</option>)}
+        </select>
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:28}}>
+        <KPICard label="Players in sample" value={roster.length} accent="#1d4ed8"/>
+        <KPICard label="Overuse flags" value={flags} accent={flags>0?'#dc2626':'#16a34a'}/>
+        <KPICard label="Team avg decay" value={avgD} accent="#8b5cf6"/>
+        <KPICard label="Avg break-even" value={medB} accent="#0891b2"/>
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'3fr 2fr',gap:20,marginBottom:20}}>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+          <SectionHeader title="Decay Curves — All Skaters" sub="Each line = one player. Shaded band = league P25–P75."/>
+          <svg width={W} height={H}>
+            <g transform={`translate(${m.left},${m.top})`}>
+              <path d={bandPath} fill="#e2eaf6" opacity="0.5"/>
+              <line x1={0} y1={yS(0)} x2={cW} y2={yS(0)} stroke="#ddd"/>
+              {yTicks.map(v=>(
+                <g key={v}><line x1={0} y1={yS(v)} x2={cW} y2={yS(v)} stroke="#f2f2f2"/>
+                  <text x={-8} y={yS(v)+4} textAnchor="end" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{v}</text></g>
+              ))}
+              {roster.map(p=>(
+                <path key={p.id} d={p.obs.map((v,i)=>`${i?'L':'M'} ${xS(AGES[i])} ${yS(v)}`).join(' ')}
+                  stroke={p.flagged?'#dc2626':'#1d4ed8'} strokeWidth="1.5" fill="none" opacity="0.6"/>
+              ))}
+              {AGES.map(t=>(<text key={t} x={xS(t)} y={cH+20} textAnchor="middle" fontSize="10" fill="#bbb" fontFamily="IBM Plex Mono">{t}</text>))}
+              <text x={cW/2} y={cH+36} textAnchor="middle" fontSize="12" fill="#888">Shift age (seconds)</text>
+            </g>
+          </svg>
+        </div>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+          <SectionHeader title="Break-even Distribution" sub="Shift age where each player projects to 0 xGD/60."/>
+          <div style={{marginTop:8}}>
+            {roster.sort((a,b)=>(a.breakeven??9999)-(b.breakeven??9999)).map(p=>(
+              <div key={p.id} style={{display:'flex',alignItems:'center',gap:8,marginBottom:7}}>
+                <button onClick={()=>{setSelectedPlayer(p);setPage('profile');}} style={{fontSize:12,fontWeight:600,color:'#1d4ed8',minWidth:120,textAlign:'left'}}>{p.name}</button>
+                <div style={{flex:1,height:6,background:'#f0f0f0',borderRadius:3,overflow:'hidden'}}>
+                  {p.breakeven && <div style={{width:`${Math.min(100,(p.breakeven/120)*100)}%`,height:'100%',background:pctBg(p.pct_decay),borderRadius:3}}/>}
+                </div>
+                <span style={{fontSize:11,fontFamily:'IBM Plex Mono',color:'#888',minWidth:44,textAlign:'right'}}>{fmtBreak(p.breakeven)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
+        <SectionHeader title="Roster Breakdown" sub="Click a player name to open their full profile."/>
+        <table>
+          <thead><tr>
+            <th style={{textAlign:'left'}}>Player</th><th>Pos</th><th>Base RAPM</th><th>Decay</th><th>Early xGD</th><th>Late xGD</th><th>TOI (min)</th><th>Break-even</th><th>Flagged</th>
+          </tr></thead>
+          <tbody>{roster.map(p=>(
+            <tr key={p.id}>
+              <td><button onClick={()=>{setSelectedPlayer(p);setPage('profile');}} style={{color:'#1d4ed8',fontWeight:600,fontSize:13}}>{p.name}</button></td>
+              <td style={{textAlign:'center',color:'#888',fontSize:12}}>{p.pos}</td>
+              <PctCell pct={p.pct_rapm} value={fmt(p.base_rapm,4)}/>
+              <PctCell pct={p.pct_decay} value={p.decay_coef.toFixed(6)}/>
+              <PctCell pct={p.pct_early} value={fmt(p.early)}/>
+              <PctCell pct={p.pct_late} value={fmt(p.late)}/>
+              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{p.toi_min}</td>
+              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{fmtBreak(p.breakeven)}</td>
+              <td style={{textAlign:'center'}}>{p.flagged?<Tag bg="#fee2e2" color="#dc2626">⚠ Yes</Tag>:<span style={{color:'#aaa',fontSize:12}}>—</span>}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// ── APP ────────────────────────────────────────────────────────────────────────
+const App = () => {
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlSeason = urlParams.get('season') || window.__DATA__.current_season;
+
+  const [page, setPage] = useState(() => localStorage.getItem('hk_page')||'overview');
+  const [selectedPlayer, setSelectedPlayer] = useState(null);
+
+  useEffect(()=>{ localStorage.setItem('hk_page', page); }, [page]);
+
+  const onSeasonChange = (s) => {
+    window.location.href = '/?season=' + s;
+  };
+
+  const goPage = (p) => setPage(p);
+
+  const breadcrumbs = {
+    overview: [{label:'League Overview'}],
+    players:  [{label:'League Overview', onClick:()=>goPage('overview')},{label:'Players'}],
+    profile:  [{label:'League Overview',onClick:()=>goPage('overview')},{label:'Players',onClick:()=>goPage('players')},{label:selectedPlayer?.name||'Profile'}],
+    lines:    [{label:'League Overview',onClick:()=>goPage('overview')},{label:'Lines'}],
+    team:     [{label:'League Overview',onClick:()=>goPage('overview')},{label:'Team Report'}],
+  };
+
+  return (
+    <div style={{minHeight:'100vh',background:'#f8f8f7'}}>
+      <TopNav page={page==='profile'?'players':page} setPage={goPage} season={urlSeason} onSeasonChange={onSeasonChange} breadcrumb={breadcrumbs[page]}/>
+      {page==='overview' && <OverviewPage setPage={goPage} setSelectedPlayer={setSelectedPlayer}/>}
+      {page==='players'  && <PlayersPage setPage={goPage} setSelectedPlayer={setSelectedPlayer} selectedPlayer={selectedPlayer}/>}
+      {page==='profile'  && <PlayerProfile player={selectedPlayer} setPage={goPage}/>}
+      {page==='lines'    && <LinesPage/>}
+      {page==='team'     && <TeamReportPage setPage={goPage} setSelectedPlayer={setSelectedPlayer}/>}
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
