@@ -9,6 +9,7 @@ import streamlit as st
 from src.models.line_analysis import get_line_decay_by_bucket, get_line_stats, get_overused_lines
 from src.ingestion.roster import get_cached_names
 from dashboard.components.clickable_table import clickable_player_table
+from dashboard._views._theme import apply_chart_theme, pct_rank, BLUE
 
 
 def _format_combo(skater_ids: tuple, name_map: dict) -> str:
@@ -33,8 +34,13 @@ def render(season: str, stints: pd.DataFrame | None):
     ## ---------------------------------------------------------------------------
 
     with tab1:
-        st.subheader("Best Lines by xG Differential per 60 (5v5)")
-        st.caption("Select a line below the table to view its decay curve and navigate to individual player profiles.")
+        st.markdown(
+            '<div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px">'
+            'Best Lines by xG Differential per 60 (5v5)</div>'
+            '<div style="font-size:12px;color:#888;font-style:italic;margin-bottom:12px">'
+            'Select a line to view its decay curve. Click any player name to open their profile.</div>',
+            unsafe_allow_html=True,
+        )
 
         try:
             stats = get_line_stats(season, min_toi_sec=int(min_toi * 60))
@@ -55,6 +61,11 @@ def render(season: str, stints: pd.DataFrame | None):
         display_src["Avg Shift Age (s)"] = display_src["avg_shift_age"].round(1)
         display_src["Stints"]           = display_src["n_stints"]
 
+        # percentile ranks for coloring
+        xgd_pcts   = pct_rank(display_src["xg_diff_per60"], higher_is_better=True).tolist()
+        xgf_pcts   = pct_rank(display_src["xgf_pct"],       higher_is_better=True).tolist()
+        cf_pcts    = pct_rank(display_src["cf_pct"],         higher_is_better=True).tolist()
+
         comp_rows = [
             {
                 "players": [
@@ -69,8 +80,9 @@ def render(season: str, stints: pd.DataFrame | None):
                     f"{r['avg_shift_age']:.1f}",
                     str(int(r["n_stints"])),
                 ],
+                "pcts": [None, float(xgd_pcts[i]), float(xgf_pcts[i]), float(cf_pcts[i]), None, None],
             }
-            for _, r in display_src.iterrows()
+            for i, (_, r) in enumerate(display_src.iterrows())
         ]
         clicked = clickable_player_table(
             rows=comp_rows,
@@ -105,28 +117,23 @@ def render(season: str, stints: pd.DataFrame | None):
                     y=bucket_df["xg_diff_per60"],
                     mode="lines+markers",
                     name="Observed xGD/60",
-                    line=dict(color="#2c7bb6", width=2.5),
+                    line=dict(color=BLUE, width=2.5),
+                    marker=dict(size=8, color=BLUE, line=dict(color="#fff", width=1.5)),
                     error_y=dict(
                         type="data",
                         array=bucket_df["xg_diff_se"].tolist(),
                         visible=True,
-                        color="#2c7bb6",
+                        color=BLUE,
                         thickness=1.2,
                     ),
                 ))
 
-                fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.6)
-                fig.add_vline(x=45, line_dash="dot", line_color="gray", opacity=0.4, annotation_text="Avg shift")
-
-                fig.update_layout(
-                    xaxis_title="Shift age (seconds)",
-                    yaxis_title="xG diff per 60",
-                    height=380,
-                    hovermode="x unified",
-                    title=f"Decay Curve: {selected_label}",
-                )
-
-                st.plotly_chart(fig, use_container_width=True)
+                fig.add_hline(y=0, line_dash="dash", line_color="#ccc", line_width=1)
+                fig.add_vline(x=45, line_dash="dot", line_color="#bbb", line_width=1,
+                              annotation_text="avg shift", annotation_font=dict(size=10, color="#aaa"))
+                apply_chart_theme(fig, height=360)
+                fig.update_layout(title=f"Decay Curve: {selected_label}")
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
                 row_match = stats[stats["home_skaters"] == combo]
                 if not row_match.empty:
@@ -149,8 +156,13 @@ def render(season: str, stints: pd.DataFrame | None):
     ## ---------------------------------------------------------------------------
 
     with tab2:
-        st.subheader("Lines Showing Significant Decay Between Early and Late Shift")
-        st.caption("Compares xGD/60 in first 30s of shift vs after 45s. Delta > 1 xGD/60 is flagged.")
+        st.markdown(
+            '<div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px">'
+            'Lines Showing Significant Decay</div>'
+            '<div style="font-size:12px;color:#888;font-style:italic;margin-bottom:12px">'
+            'Compares xGD/60 in first 30s vs after 45s. Drop > 1.0 xGD/60 is flagged.</div>',
+            unsafe_allow_html=True,
+        )
 
         try:
             overuse_df = get_overused_lines(season, min_toi_min=min_toi)
@@ -169,6 +181,11 @@ def render(season: str, stints: pd.DataFrame | None):
         not_flagged = overuse_df[~overuse_df["overuse_flag"]].copy()
 
         def _overuse_rows(df, key):
+            if df.empty:
+                return
+            early_pcts  = pct_rank(df["early_xgd60"],  higher_is_better=True).tolist()
+            late_pcts   = pct_rank(df["late_xgd60"],   higher_is_better=True).tolist()
+            decay_pcts  = pct_rank(df["decay_delta"],   higher_is_better=False).tolist()
             rows = [
                 {
                     "players": [
@@ -181,8 +198,9 @@ def render(season: str, stints: pd.DataFrame | None):
                         f"{r['late_xgd60']:.2f}",
                         f"{r['decay_delta']:.2f}",
                     ],
+                    "pcts": [None, float(early_pcts[i]), float(late_pcts[i]), float(decay_pcts[i])],
                 }
-                for _, r in df.iterrows()
+                for i, (_, r) in enumerate(df.iterrows())
             ]
             clicked = clickable_player_table(
                 rows=rows,

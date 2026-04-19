@@ -26,6 +26,72 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+st.markdown("""
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+html, body,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+[data-testid="block-container"] {
+    background-color: #f8f8f7 !important;
+    font-family: 'IBM Plex Sans', sans-serif !important;
+}
+[data-testid="stSidebar"] {
+    background: #ffffff !important;
+    border-right: 1px solid #e8e8e8 !important;
+}
+[data-testid="stSidebar"] * { font-family: 'IBM Plex Sans', sans-serif !important; }
+h1, h2, h3, h4 {
+    font-family: 'IBM Plex Sans', sans-serif !important;
+    letter-spacing: -0.015em !important;
+    font-weight: 700 !important;
+    color: #111 !important;
+}
+/* KPI metric cards */
+[data-testid="stMetric"] {
+    background: #ffffff;
+    border: 1px solid #e8e8e8;
+    border-radius: 6px;
+    padding: 16px 20px !important;
+}
+[data-testid="stMetricLabel"] > div {
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.07em !important;
+    color: #888 !important;
+}
+[data-testid="stMetricValue"] > div {
+    font-family: 'IBM Plex Mono', monospace !important;
+    font-size: 24px !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.02em !important;
+    color: #111 !important;
+}
+/* Tabs */
+[data-testid="stTab"] button {
+    font-weight: 600 !important;
+    font-family: 'IBM Plex Sans', sans-serif !important;
+    letter-spacing: 0.01em !important;
+}
+/* Dataframe border */
+.stDataFrame { border-radius: 6px !important; overflow: hidden; }
+/* Caption italic */
+[data-testid="stCaptionContainer"] p {
+    font-style: italic !important;
+    color: #888 !important;
+    font-size: 12px !important;
+}
+/* Subheader weight */
+[data-testid="stHeadingWithActionElements"] h2 {
+    font-size: 16px !important;
+    letter-spacing: -0.01em !important;
+}
+/* Selectbox font */
+[data-baseweb="select"] { font-family: 'IBM Plex Sans', sans-serif !important; }
+</style>
+""", unsafe_allow_html=True)
+
 ## ---------------------------------------------------------------------------
 ## sidebar nav
 ## ---------------------------------------------------------------------------

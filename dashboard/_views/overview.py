@@ -1,133 +1,210 @@
-## Overview page -- league-wide decay coefficient distribution and scatter.
+## Overview page -- league-wide metrics, distribution charts, leaderboards.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.models.rapm_reader import get_break_even_second
 from dashboard.components.clickable_table import clickable_player_table
+from dashboard._views._theme import (
+    apply_chart_theme, pct_bg, pct_fg, pct_rank, BLUE, RED,
+)
+
+
+def _fmt(v, d=4, sign=True):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "—"
+    s = f"{abs(v):.{d}f}"
+    if sign:
+        return ("+" if v >= 0 else "-") + s
+    return s
+
+
+def _fmtbe(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "Never"
+    return f"{int(v)}s" if v <= 200 else ">200s"
+
+
+def _decay_histogram(rapm: pd.DataFrame) -> go.Figure:
+    vals = rapm["rapm_decay"].dropna()
+    vmin, vmax = float(vals.min()), float(vals.max())
+    n_bins = 16
+    step   = (vmax - vmin) / n_bins
+    edges  = [vmin + i * step for i in range(n_bins + 1)]
+    counts = [int(((vals >= edges[i]) & (vals < edges[i + 1])).sum()) for i in range(n_bins)]
+    counts[-1] += int((vals == vmax).sum())
+    centers = [(edges[i] + edges[i + 1]) / 2 for i in range(n_bins)]
+    pcts    = [float((vals < c).mean() * 100) for c in centers]
+
+    fig = go.Figure()
+    for c, cnt, pct in zip(centers, counts, pcts):
+        fig.add_trace(go.Bar(
+            x=[c], y=[cnt],
+            width=step * 0.9,
+            marker_color=pct_bg(pct),
+            marker_line_width=0,
+            showlegend=False,
+            hovertemplate=f"Decay: {c:.5f}<br>Players: {cnt}<extra></extra>",
+        ))
+
+    fig.add_vline(x=0, line_dash="dash", line_color="#c00", line_width=1.5,
+                  annotation_text="0", annotation_font=dict(color="#c00", size=10))
+    fig.update_layout(xaxis_title="Decay coefficient", yaxis_title="Players", barmode="overlay", bargap=0)
+    apply_chart_theme(fig, height=220)
+    fig.update_layout(margin=dict(l=44, r=16, t=16, b=48))
+    return fig
+
+
+def _rapm_scatter(rapm: pd.DataFrame) -> go.Figure:
+    flagged = rapm[rapm["overuse_flag"]]
+    normal  = rapm[~rapm["overuse_flag"]]
+
+    fig = go.Figure()
+    for df, color, name in [(normal, BLUE, "Normal"), (flagged, RED, "Flagged")]:
+        fig.add_trace(go.Scatter(
+            x=df["rapm_decay"],
+            y=df["rapm_base"],
+            mode="markers",
+            marker=dict(color=color, size=6, opacity=0.75, line=dict(color="#fff", width=1)),
+            name=name,
+            text=df["player_name"],
+            hovertemplate="<b>%{text}</b><br>Base RAPM: %{y:.4f}<br>Decay: %{x:.6f}<extra></extra>",
+        ))
+
+    fig.add_hline(y=0, line_color="#eee", line_width=1)
+    fig.add_vline(x=0, line_dash="dash", line_color="#ddd", line_width=1)
+    fig.update_layout(
+        xaxis_title="Decay coefficient",
+        yaxis_title="Base RAPM",
+        legend=dict(orientation="h", x=0, y=1.08, font=dict(size=11)),
+    )
+    apply_chart_theme(fig, height=220)
+    fig.update_layout(margin=dict(l=52, r=16, t=24, b=48))
+    return fig
 
 
 def render(season: str, rapm: pd.DataFrame | None):
-    st.title("Shift Decay RAPM -- League Overview")
+    st.title("League Overview")
+    st.caption(f"Shift-age decay analysis across all skaters · Season {season[:4]}–{season[4:]} · 5v5")
 
     if rapm is None:
-        st.warning(f"No RAPM data found for {season}. Run the R model first.")
+        st.warning(f"No RAPM data for {season}.")
+        st.code(
+            f"python -m src.ingestion.pipeline --season {season}\n"
+            f"Rscript r/rapm/rapm_model.R --season {season}"
+        )
         return
 
+    overuse_n  = int(rapm["overuse_flag"].sum())
+    avg_decay  = float(rapm["rapm_decay"].mean())
+    be_vals    = rapm.apply(
+        lambda r: -r["rapm_base"] / r["rapm_decay"]
+        if r["rapm_decay"] < -0.00002 and r["rapm_base"] > 0 else np.nan,
+        axis=1,
+    )
+    median_be  = float(be_vals.dropna().median()) if be_vals.notna().any() else np.nan
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Players in sample", len(rapm))
+    c2.metric("Overuse flags", overuse_n, help="decay < −0.00035 and min 50 min TOI")
+    c3.metric("Avg decay coef", f"{avg_decay:.6f}", help="Negative = worsens with shift age")
+    c4.metric("Median break-even", _fmtbe(median_be) if not np.isnan(median_be) else "N/A")
+
+    st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
+
+    col_hist, col_scatter = st.columns(2)
+
+    with col_hist:
+        st.markdown(
+            '<div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px">'
+            'Distribution of Decay Coefficients</div>'
+            '<div style="font-size:12px;color:#888;font-style:italic;margin-bottom:4px">'
+            'Red bars = fastest decay. Blue = holds up well with shift age.</div>',
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(_decay_histogram(rapm), use_container_width=True, config={"displayModeBar": False})
+
+    with col_scatter:
+        st.markdown(
+            '<div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px">'
+            'Base RAPM vs. Decay Rate</div>'
+            '<div style="font-size:12px;color:#888;font-style:italic;margin-bottom:4px">'
+            'Red = overuse-flagged. Ideal: upper-left (good RAPM, low decay).</div>',
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(_rapm_scatter(rapm), use_container_width=True, config={"displayModeBar": False})
+
+    st.markdown("<div style='margin-bottom:4px'></div>", unsafe_allow_html=True)
+
+    # percentile ranks for cell coloring
     rapm = rapm.copy()
-    rapm["break_even_sec"] = rapm.apply(
-        lambda r: get_break_even_second(r["rapm_base"], r["rapm_decay"]), axis=1
-    )
-
-    ## ---------------------------------------------------------------------------
-    ## top metrics
-    ## ---------------------------------------------------------------------------
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Players in sample", len(rapm))
-    col2.metric("Overuse flags", int(rapm["overuse_flag"].sum()))
-    col3.metric(
-        "Avg decay coef",
-        f"{rapm['rapm_decay'].mean():.3f}",
-        help="Negative = players get worse as shifts age on average",
-    )
-    col4.metric(
-        "Median break-even",
-        f"{rapm['break_even_sec'].median():.0f}s"
-        if rapm["break_even_sec"].notna().any()
-        else "N/A",
-    )
-
-    st.markdown("---")
-
-    ## ---------------------------------------------------------------------------
-    ## decay coefficient histogram
-    ## ---------------------------------------------------------------------------
+    rapm["pct_rapm"]  = pct_rank(rapm["rapm_base"],  higher_is_better=True)
+    rapm["pct_decay"] = pct_rank(rapm["rapm_decay"],  higher_is_better=True)
+    rapm["pct_toi"]   = pct_rank(rapm["toi_5v5"],    higher_is_better=True)
+    rapm["break_even"] = be_vals
 
     col_left, col_right = st.columns(2)
 
     with col_left:
-        st.subheader("Distribution of Decay Coefficients")
-        fig = px.histogram(
-            rapm,
-            x="rapm_decay",
-            nbins=40,
-            color_discrete_sequence=["#2c7bb6"],
-            labels={"rapm_decay": "Decay coefficient"},
+        st.markdown(
+            '<div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px">'
+            'Most Overused Players</div>'
+            '<div style="font-size:12px;color:#888;font-style:italic;margin-bottom:12px">'
+            'Fastest decay coefficient. Click a name to view their profile.</div>',
+            unsafe_allow_html=True,
         )
-        fig.add_vline(x=0, line_dash="dash", line_color="red", annotation_text="zero")
-        fig.add_vline(x=-0.05, line_dash="dot", line_color="orange", annotation_text="overuse threshold")
-        fig.update_layout(showlegend=False, height=350)
-        st.plotly_chart(fig, use_container_width=True)
-
-    ## ---------------------------------------------------------------------------
-    ## base RAPM vs decay scatter
-    ## ---------------------------------------------------------------------------
+        worst_src = rapm.sort_values("rapm_decay").head(12).reset_index(drop=True)
+        comp_rows = [
+            {
+                "id": int(r["player_id"]),
+                "values": [
+                    r["player_name"],
+                    r.get("team", ""),
+                    _fmt(r["rapm_base"], 4),
+                    f"{r['rapm_decay']:.6f}",
+                    f"{r['toi_5v5']:.1f}",
+                    _fmtbe(r["break_even"]),
+                ],
+                "pcts": [None, None, float(r["pct_rapm"]), float(r["pct_decay"]), float(r["pct_toi"]), None],
+            }
+            for _, r in worst_src.iterrows()
+        ]
+        clicked = clickable_player_table(rows=comp_rows,
+                                         headers=["Player", "Team", "Base RAPM", "Decay", "TOI (min)", "Break-even"],
+                                         key="overview_worst")
+        if clicked is not None:
+            st.session_state["selected_player_id"] = clicked
+            st.rerun()
 
     with col_right:
-        st.subheader("Base RAPM vs Decay Rate")
-        plot_df = rapm[rapm["toi_5v5"] >= 50].copy()
-        plot_df["label"] = plot_df.apply(
-            lambda r: f"{r['player_name']}<br>Base: {r['rapm_base']:.2f} | Decay: {r['rapm_decay']:.3f}",
-            axis=1,
+        st.markdown(
+            '<div style="font-size:15px;font-weight:700;color:#111;margin-bottom:2px">'
+            'Top Performers by Base RAPM</div>'
+            '<div style="font-size:12px;color:#888;font-style:italic;margin-bottom:12px">'
+            'Best baseline value regardless of decay.</div>',
+            unsafe_allow_html=True,
         )
-
-        fig2 = px.scatter(
-            plot_df,
-            x="rapm_decay",
-            y="rapm_base",
-            color="overuse_flag",
-            size="toi_5v5",
-            hover_name="player_name",
-            hover_data={"rapm_base": ":.2f", "rapm_decay": ":.3f", "toi_5v5": ":.1f"},
-            color_discrete_map={True: "#d6604d", False: "#4393c3"},
-            labels={
-                "rapm_decay": "Decay coefficient",
-                "rapm_base": "Base RAPM",
-                "overuse_flag": "Overuse flag",
-            },
-            height=350,
-        )
-        fig2.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-        fig2.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    ## ---------------------------------------------------------------------------
-    ## worst decayers table
-    ## ---------------------------------------------------------------------------
-
-    st.subheader("Most Overused Players (fastest decay, min 50 min TOI)")
-    st.caption("Click a player name to open their profile.")
-    worst_src = (
-        rapm[rapm["toi_5v5"] >= 50]
-        .sort_values("rapm_decay")
-        .head(15)
-        .reset_index(drop=True)
-    )
-    rows = [
-        {
-            "id": int(r["player_id"]),
-            "values": [
-                r["player_name"],
-                r.get("team", ""),
-                f"{r['rapm_base']:.4f}",
-                f"{r['rapm_decay']:.4f}",
-                f"{r['toi_5v5']:.1f}",
-                f"{int(r['break_even_sec'])}s" if pd.notna(r["break_even_sec"]) else "Never",
-                "Yes" if r["overuse_flag"] else "",
-            ],
-        }
-        for _, r in worst_src.iterrows()
-    ]
-    clicked = clickable_player_table(
-        rows=rows,
-        headers=["Player", "Team", "Base RAPM", "Decay", "TOI (min)", "Break-even", "Flagged"],
-        key="overview_worst",
-    )
-    if clicked is not None:
-        st.session_state["selected_player_id"] = clicked
-        st.rerun()
+        top_src = rapm.sort_values("rapm_base", ascending=False).head(10).reset_index(drop=True)
+        comp_rows_top = [
+            {
+                "id": int(r["player_id"]),
+                "values": [
+                    r["player_name"],
+                    r.get("team", ""),
+                    _fmt(r["rapm_base"], 4),
+                    f"{r['rapm_decay']:.6f}",
+                    f"{r['toi_5v5']:.1f}",
+                ],
+                "pcts": [None, None, float(r["pct_rapm"]), float(r["pct_decay"]), float(r["pct_toi"])],
+            }
+            for _, r in top_src.iterrows()
+        ]
+        clicked2 = clickable_player_table(rows=comp_rows_top,
+                                           headers=["Player", "Team", "Base RAPM", "Decay", "TOI (min)"],
+                                           key="overview_top")
+        if clicked2 is not None:
+            st.session_state["selected_player_id"] = clicked2
+            st.rerun()

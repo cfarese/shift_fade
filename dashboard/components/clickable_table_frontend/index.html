@@ -2,37 +2,43 @@
 <html>
 <head>
 <meta charset="UTF-8">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  html, body { margin: 0; padding: 0; overflow: hidden; font-size: 14px; font-family: "Source Sans Pro", sans-serif; }
+  html, body { margin: 0; padding: 0; overflow: hidden; font-size: 14px; font-family: "IBM Plex Sans", "Source Sans Pro", sans-serif; }
   * { box-sizing: border-box; }
   table { width: 100%; border-collapse: collapse; }
   thead th {
-    text-align: left;
-    padding: 7px 12px;
+    text-align: right;
+    padding: 8px 10px;
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    border-bottom: 1px solid var(--border);
-    color: var(--muted);
+    letter-spacing: 0.06em;
+    border-bottom: 2px solid #e5e5e5;
+    color: #666;
     white-space: nowrap;
+    background: #fff;
   }
-  tbody tr { border-bottom: 1px solid var(--border); }
-  tbody tr:hover { background: var(--hover); }
-  td { padding: 6px 12px; color: var(--text); }
+  thead th:first-child { text-align: left; }
+  tbody tr { border-bottom: 1px solid #f0f0f0; }
+  tbody tr:hover td { background: #fafaf9 !important; }
+  td { padding: 7px 10px; color: var(--text, #111); font-size: 13px; text-align: right; vertical-align: middle; }
+  td:first-child { text-align: left; }
   .name-btn {
     background: none;
     border: none;
     padding: 0;
     margin: 0;
     cursor: pointer;
-    color: var(--link);
-    font-size: 14px;
-    font-family: inherit;
-    font-weight: 500;
+    color: #1d4ed8;
+    font-size: 13px;
+    font-family: "IBM Plex Sans", inherit;
+    font-weight: 600;
+    text-align: left;
   }
   .name-btn:hover { text-decoration: underline; }
   .sep { opacity: 0.4; margin: 0 2px; }
+  .mono { font-family: "IBM Plex Mono", monospace; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -47,19 +53,38 @@
 
   function applyTheme(t) {
     if (!t) return;
-    var dark = t.base === "dark";
-    var r = document.documentElement;
-    r.style.setProperty("--text",   t.textColor || (dark ? "#fafafa" : "#31333F"));
-    r.style.setProperty("--muted",  dark ? "rgba(250,250,250,0.45)" : "rgba(49,51,63,0.45)");
-    r.style.setProperty("--border", dark ? "rgba(250,250,250,0.08)" : "rgba(49,51,63,0.1)");
-    r.style.setProperty("--hover",  dark ? "rgba(250,250,250,0.04)" : "rgba(49,51,63,0.04)");
-    r.style.setProperty("--link",   t.primaryColor || "#ff4b4b");
-    document.body.style.color      = t.textColor || "";
     document.body.style.background = "transparent";
   }
 
   function esc(s) {
     return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  /* percentile color scale: red(0) -> white(50) -> blue(100) */
+  function pctBg(pct) {
+    var t = Math.max(0, Math.min(100, pct)) / 100;
+    var r, g, b;
+    if (t < 0.5) {
+      var s = t * 2;
+      r = Math.round(214 + (255 - 214) * s);
+      g = Math.round(40  + (255 - 40)  * s);
+      b = Math.round(40  + (255 - 40)  * s);
+    } else {
+      var s = (t - 0.5) * 2;
+      r = Math.round(255 + (29  - 255) * s);
+      g = Math.round(255 + (100 - 255) * s);
+      b = Math.round(255 + (220 - 255) * s);
+    }
+    return "rgb(" + r + "," + g + "," + b + ")";
+  }
+  function pctFg(pct) { return (pct < 18 || pct > 82) ? "#fff" : "#222"; }
+
+  function renderCell(v, pct) {
+    if (pct != null && pct !== undefined) {
+      var bg = pctBg(pct), fg = pctFg(pct);
+      return '<td class="mono" style="background:' + bg + ';color:' + fg + ';text-align:right">' + esc(String(v)) + '</td>';
+    }
+    return '<td class="mono">' + esc(String(v)) + '</td>';
   }
 
   function render(args, theme) {
@@ -74,19 +99,22 @@
       var firstCell;
 
       if (row.players) {
-        // multi-player line row: render each name as its own button separated by " / "
         var links = row.players.map(function(p) {
           return '<button class="name-btn" onclick="pick(' + p.id + ')">' + esc(p.name) + '</button>';
         }).join('<span class="sep"> / </span>');
         firstCell = "<td>" + links + "</td>";
       } else {
-        // single-player row
         firstCell = '<td><button class="name-btn" onclick="pick(' + row.id + ')">' + esc(String(row.values[0])) + '</button></td>';
       }
 
       var restValues = row.players ? row.values : row.values.slice(1);
-      var restCells  = restValues.map(function(v) {
-        return "<td>" + esc(String(v)) + "</td>";
+      var restPcts   = row.pcts   || [];
+      /* for single-player rows the pcts array aligns with values (index 0 = name = no pct) */
+      var pctOffset  = row.players ? 0 : 1;
+
+      var restCells = restValues.map(function(v, i) {
+        var pct = restPcts[i + pctOffset];
+        return renderCell(v, pct != null ? pct : null);
       }).join("");
 
       return "<tr>" + firstCell + restCells + "</tr>";

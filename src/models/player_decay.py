@@ -125,3 +125,30 @@ def get_league_decay_summary(season: str, min_toi_sec: int = 1800) -> pd.DataFra
 
     cols = ["player_id", "toi_min", "early_xgd60", "late_xgd60", "decay_delta", "early_toi_min", "late_toi_min"]
     return merged[cols].sort_values("decay_delta").reset_index(drop=True)
+
+
+def get_league_curve_bands(season: str, min_toi_sec: int = 600) -> dict | None:
+    """Interpolated P25/median/P75 bands for the decay curve overlay."""
+    summary = get_league_decay_summary(season, min_toi_sec=min_toi_sec)
+    if summary.empty:
+        return None
+
+    ep25 = float(summary["early_xgd60"].quantile(0.25))
+    emed = float(summary["early_xgd60"].median())
+    ep75 = float(summary["early_xgd60"].quantile(0.75))
+    lp25 = float(summary["late_xgd60"].quantile(0.25))
+    lmed = float(summary["late_xgd60"].median())
+    lp75 = float(summary["late_xgd60"].quantile(0.75))
+
+    buckets = [0, 10, 20, 30, 40, 50, 60, 70, 80]
+
+    def interp(a: float, b: float, t: float) -> float:
+        frac = max(0.0, min(1.0, (t - 10.0) / 50.0))
+        return round(a + (b - a) * frac, 3)
+
+    return {
+        "buckets": buckets,
+        "p25": [interp(ep25, lp25, t) for t in buckets],
+        "med": [interp(emed, lmed, t) for t in buckets],
+        "p75": [interp(ep75, lp75, t) for t in buckets],
+    }
