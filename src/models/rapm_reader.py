@@ -51,10 +51,13 @@ def compute_decay_curve(
 def get_break_even_second(rapm_base: float, rapm_decay: float) -> Optional[int]:
     ## when does rapm_base + rapm_decay * t == 0?
     ## t = -rapm_base / rapm_decay, only valid if decay is negative
+    import math
+    if math.isnan(rapm_base) or math.isnan(rapm_decay):
+        return None
     if rapm_decay >= 0:
         return None
     t = -rapm_base / rapm_decay
-    if t < 0:
+    if t < 0 or math.isnan(t) or math.isinf(t):
         return None
     return int(t)
 

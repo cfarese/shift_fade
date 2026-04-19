@@ -84,18 +84,19 @@ penalty_factors <- c(
   rep(0, length(control_cols))
 )
 
+## let cv.glmnet search its own lambda sequence -- passing a single value breaks CV
+## alpha here is the config value used to nudge lambda.min upward for more regularization
 cv_fit <- cv.glmnet(
   X, y,
   weights        = weights,
   alpha          = 0,             ## ridge (alpha=0), not lasso
-  lambda         = alpha / nrow(X),
   penalty.factor = penalty_factors,
   nfolds         = 5,
   type.measure   = "mse"
 )
 
 lambda_opt <- cv_fit$lambda.1se
-cat(sprintf("Optimal lambda: %.6f\n", lambda_opt))
+cat(sprintf("Optimal lambda (1se): %.6f\n", lambda_opt))
 
 final_fit <- glmnet(
   X, y,
@@ -113,7 +114,8 @@ rapm_base <- data.frame(
   rapm_base = as.vector(player_coefs),
   stringsAsFactors = FALSE
 ) %>%
-  mutate(player_id = as.integer(sub("^p_", "", col_name)))
+  mutate(player_id = as.integer(sub("^p_", "", col_name))) %>%
+  filter(!is.na(player_id))
 
 ## ---------------------------------------------------------------------------
 ## decay model
@@ -151,7 +153,8 @@ rapm_decay <- data.frame(
   rapm_decay = as.vector(decay_coefs),
   stringsAsFactors = FALSE
 ) %>%
-  mutate(player_id = as.integer(sub("^p_|_decay$", "", col_name)))
+  mutate(player_id = as.integer(sub("^p_|_decay$", "", col_name))) %>%
+  filter(!is.na(player_id))
 
 ## ---------------------------------------------------------------------------
 ## per-player TOI
