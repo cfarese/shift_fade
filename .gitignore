@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+data/raw/
+data/processed/
+data/cache/
+*.parquet
+*.feather
+.DS_Store
+.Rhistory
+.RData
