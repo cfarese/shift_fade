@@ -30,6 +30,9 @@ AGES = [0, 10, 20, 30, 40, 50, 60, 70, 80]
 MIN_TOI_MIN = 10.0        # players with less 5v5 TOI are excluded from all views
 OVERUSE_TOI_MIN = 50.0    # minimum TOI to be considered for overuse flag
 OVERUSE_DECAY_PCT = 15    # bottom N-th percentile of decay among eligible players
+SHIFT_GAP_TOLERANCE = 15
+MIN_QUALIFYING_SHIFT_SECONDS = 10
+MIN_QUALIFYING_SHIFTS = 200
 app = FastAPI()
 
 
@@ -90,6 +93,7 @@ def _build_data(season: str) -> dict:
     # filter out players with insufficient playing time before any analysis
     rapm = rapm[rapm["toi_5v5"] >= MIN_TOI_MIN].copy()
     name_map = get_cached_names()
+    shift_counts = _get_player_shift_counts(season)
 
     # ── PLAYERS ───────────────────────────────────────────────────────────────
     players = []
@@ -102,6 +106,9 @@ def _build_data(season: str) -> dict:
         drop  = round(late - early, 2)
         pid   = int(row["player_id"])
         info  = name_map.get(pid, {})
+        counts = shift_counts.get(pid, {})
+        qualifying_shifts = int(counts.get("qualifying_shifts", 0))
+        total_shifts = int(counts.get("total_shifts", 0))
         players.append({
             "id":         pid,
             "name":       str(row.get("player_name", info.get("name", f"Player_{pid}"))),
@@ -110,7 +117,9 @@ def _build_data(season: str) -> dict:
             "base_rapm":  round(base, 4),
             "decay_coef": round(decay, 6),
             "toi_min":    round(float(row["toi_5v5"]), 1),
-            "stints":     0,
+            "stints":     total_shifts,
+            "qualifying_shifts_10s": qualifying_shifts,
+            "eligible_for_graphs": qualifying_shifts >= MIN_QUALIFYING_SHIFTS,
             "breakeven":  _break_even(base, decay),
             "obs":        obs,
             "early":      early,
@@ -145,8 +154,6 @@ def _build_data(season: str) -> dict:
 
     try:
         idx = _get_player_index(season)
-        cnt = idx.groupby("player_id").size().to_dict()
-
         idx2 = idx.copy()
         idx2["shift_bucket"] = (idx2["shift_age"] // 10) * 10
         idx2["shift_bucket"] = idx2["shift_bucket"].clip(upper=90)
@@ -158,7 +165,6 @@ def _build_data(season: str) -> dict:
         bcnt   = qual.groupby("player_id").size().to_dict()
 
         for p in players:
-            p["stints"]          = int(cnt.get(p["id"], 0))
             p["n_decay_buckets"] = int(bcnt.get(p["id"], 0))
     except Exception:
         pass
@@ -198,6 +204,8 @@ def _build_data(season: str) -> dict:
         "seasons":        _available_seasons(),
         "current_season": season,
         "rapm_ready":     True,
+        "min_qualifying_shift_seconds": MIN_QUALIFYING_SHIFT_SECONDS,
+        "min_qualifying_shifts": MIN_QUALIFYING_SHIFTS,
     }
 
 
@@ -264,19 +272,135 @@ def _get_data(season: str) -> dict:
     return _CACHE[season]
 
 
+def _bucket_shift_age_overlap(df, bucket_size: int = 10, min_shift_age_sec: int = 0):
+    import pandas as pd
+
+    if df.empty:
+        return pd.DataFrame(columns=["shift_bucket", "toi_sec", "xg_for", "xg_against", "n_segments"])
+
+    rows = []
+    for row in df.itertuples(index=False):
+        start_age = float(max(min_shift_age_sec, getattr(row, "shift_age")))
+        duration = float(getattr(row, "duration"))
+        end_age = start_age + duration
+        if end_age <= start_age:
+            continue
+
+        xg_for = float(getattr(row, "p_xgf"))
+        xg_against = float(getattr(row, "p_xga"))
+        bucket = int(start_age // bucket_size) * bucket_size
+        while bucket < end_age:
+            bucket_end = bucket + bucket_size
+            overlap = min(end_age, bucket_end) - max(start_age, bucket)
+            if overlap > 0:
+                frac = overlap / duration if duration > 0 else 0
+                rows.append({
+                    "shift_bucket": bucket,
+                    "toi_sec": overlap,
+                    "xg_for": xg_for * frac,
+                    "xg_against": xg_against * frac,
+                    "n_segments": 1,
+                })
+            bucket += bucket_size
+
+    if not rows:
+        return pd.DataFrame(columns=["shift_bucket", "toi_sec", "xg_for", "xg_against", "n_segments"])
+
+    return (
+        pd.DataFrame(rows)
+        .groupby("shift_bucket", as_index=False)
+        .agg(
+            toi_sec=("toi_sec", "sum"),
+            xg_for=("xg_for", "sum"),
+            xg_against=("xg_against", "sum"),
+            n_segments=("n_segments", "sum"),
+        )
+        .sort_values("shift_bucket")
+    )
+
+
+def _get_league_empirical_curve(
+    season: str,
+    bucket_size: int = 10,
+    min_stint_sec: int = 10,
+) -> dict:
+    idx = _get_stint_meta(season).copy()
+    if idx.empty:
+        return {
+            "buckets": [],
+            "values": [],
+            "delta_values": [],
+            "toi_sec": [],
+        }
+
+    if min_stint_sec > 0:
+        idx = idx[idx["duration"] >= min_stint_sec]
+    if idx.empty:
+        return {
+            "buckets": [],
+            "values": [],
+            "delta_values": [],
+            "toi_sec": [],
+        }
+
+    bucketed = _bucket_shift_age_overlap(idx, bucket_size=bucket_size)
+    if bucketed.empty:
+        return {
+            "buckets": [],
+            "values": [],
+            "delta_values": [],
+            "toi_sec": [],
+        }
+
+    bucketed["xgd60"] = (bucketed["xg_for"] - bucketed["xg_against"]) / bucketed["toi_sec"] * 3600
+    fresh = float(bucketed.iloc[0]["xgd60"])
+    bucketed["delta_xgd60"] = bucketed["xgd60"] - fresh
+
+    return {
+        "buckets": [int(v) for v in bucketed["shift_bucket"].tolist()],
+        "values": [round(float(v), 3) for v in bucketed["xgd60"].tolist()],
+        "delta_values": [round(float(v), 3) for v in bucketed["delta_xgd60"].tolist()],
+        "toi_sec": [round(float(v), 1) for v in bucketed["toi_sec"].tolist()],
+    }
+
+
 @app.get("/player/{player_id}/decay")
 async def player_decay(player_id: int, season: str | None = None):
     available = _available_seasons()
     if season is None:
         season = available[-1] if available else (cfg.seasons[-1] if cfg.seasons else "20232024")
     try:
-        df = get_player_rolling_decay(season, player_id, window=20, step=5, min_toi_sec=60, min_stint_sec=20)
-        if df.empty:
-            return JSONResponse({"buckets": [], "values": [], "max_age": 80})
+        idx = _get_stint_meta(season)
+        df = idx[idx["player_id"] == player_id].copy()
+        if not df.empty:
+            df = df[df["duration"] >= 10]
+        shift_summary = _get_player_shift_summary(season, player_id)
+        bucketed = _bucket_shift_age_overlap(df, bucket_size=10)
+        if not bucketed.empty:
+            bucketed = bucketed[(bucketed["toi_sec"] >= 60) & (bucketed["n_segments"] >= 3)].copy()
+        if bucketed.empty:
+            return JSONResponse({
+                "buckets": [],
+                "values": [],
+                "delta_values": [],
+                "toi_sec": [],
+                "stints": [],
+                "league": _get_league_empirical_curve(season),
+                "max_age": 80,
+                "max_shift_duration": shift_summary["max_shift_duration"],
+            })
+        bucketed["xgd60"] = (bucketed["xg_for"] - bucketed["xg_against"]) / bucketed["toi_sec"] * 3600
+        fresh = float(bucketed.iloc[0]["xgd60"])
+        bucketed["delta_xgd60"] = bucketed["xgd60"] - fresh
         return JSONResponse({
-            "buckets": df["age"].tolist(),
-            "values":  df["xgd60"].tolist(),
-            "max_age": int(df["age"].max()),
+            "buckets": [int(v) for v in bucketed["shift_bucket"].tolist()],
+            "values": [round(float(v), 3) for v in bucketed["xgd60"].tolist()],
+            "delta_values": [round(float(v), 3) for v in bucketed["delta_xgd60"].tolist()],
+            "toi_sec": [round(float(v), 1) for v in bucketed["toi_sec"].tolist()],
+            "stints": [int(v) for v in bucketed["n_segments"].tolist()],
+            "league": _get_league_empirical_curve(season),
+            "max_age": int(bucketed["shift_bucket"].max()),
+            "max_shift_duration": shift_summary["max_shift_duration"],
         })
     except Exception as exc:
         return JSONResponse({"buckets": [], "values": [], "se": [], "error": str(exc)})
@@ -284,6 +408,7 @@ async def player_decay(player_id: int, season: str | None = None):
 
 ## per-season cache of the exploded 5v5 stint frame with original row metadata
 _STINT_META_CACHE: dict[str, "pd.DataFrame"] = {}
+_PLAYER_SHIFT_COUNTS_CACHE: dict[str, dict[int, dict[str, int]]] = {}
 
 
 def _get_stint_meta(season: str) -> "pd.DataFrame":
@@ -326,9 +451,121 @@ def _get_stint_meta(season: str) -> "pd.DataFrame":
             "p_xgf", "p_xga"]
     combined = pd.concat([home[cols], away[cols]], ignore_index=True)
     combined["xgd"]   = combined["p_xgf"] - combined["p_xga"]
+    combined = combined.sort_values(["player_id", "game_id", "period", "start_sec"]).reset_index(drop=True)
+    combined["end_sec"] = combined["start_sec"] + combined["duration"]
+
+    prev_player = combined["player_id"].shift(1)
+    prev_game = combined["game_id"].shift(1)
+    prev_period = combined["period"].shift(1)
+    prev_end = combined["end_sec"].shift(1)
+    is_new_shift = (
+        (combined["player_id"] != prev_player) |
+        (combined["game_id"] != prev_game) |
+        (combined["period"] != prev_period) |
+        ((combined["start_sec"] - prev_end) > SHIFT_GAP_TOLERANCE)
+    )
+    is_new_shift.iloc[0] = True
+    combined["shift_id"] = is_new_shift.cumsum().astype(int)
+    combined["shift_start_sec"] = combined.groupby(["player_id", "shift_id"])["start_sec"].transform("min")
+    combined["shift_age"] = (combined["start_sec"] - combined["shift_start_sec"]).clip(lower=0)
+    combined = combined.drop(columns=["end_sec", "shift_start_sec"])
 
     _STINT_META_CACHE[season] = combined
     return combined
+
+
+def _get_player_shift_counts(season: str) -> dict[int, dict[str, int]]:
+    import pandas as pd
+
+    if season in _PLAYER_SHIFT_COUNTS_CACHE:
+        return _PLAYER_SHIFT_COUNTS_CACHE[season]
+
+    meta = _get_stint_meta(season)
+    if meta.empty:
+        _PLAYER_SHIFT_COUNTS_CACHE[season] = {}
+        return _PLAYER_SHIFT_COUNTS_CACHE[season]
+
+    subset = meta.sort_values(["player_id", "game_id", "period", "start_sec"]).copy()
+    subset["end_sec"] = subset["start_sec"] + subset["duration"]
+
+    prev_player = subset["player_id"].shift(1)
+    prev_game = subset["game_id"].shift(1)
+    prev_period = subset["period"].shift(1)
+    prev_end = subset["end_sec"].shift(1)
+
+    is_new = (
+        (subset["player_id"] != prev_player) |
+        (subset["game_id"] != prev_game) |
+        (subset["period"] != prev_period) |
+        ((subset["start_sec"] - prev_end) > SHIFT_GAP_TOLERANCE)
+    )
+    is_new.iloc[0] = True
+    subset["shift_id"] = is_new.cumsum().astype(int)
+
+    shifts = (
+        subset.groupby(["player_id", "shift_id"], sort=False)
+        .agg(
+            start_sec=("start_sec", "first"),
+            end_sec=("end_sec", "last"),
+        )
+        .reset_index()
+    )
+    shifts["duration"] = shifts["end_sec"] - shifts["start_sec"]
+    shifts["qualifies"] = shifts["duration"] > MIN_QUALIFYING_SHIFT_SECONDS
+
+    counts = (
+        shifts.groupby("player_id")
+        .agg(
+            total_shifts=("shift_id", "count"),
+            qualifying_shifts=("qualifies", "sum"),
+        )
+        .reset_index()
+    )
+
+    out = {
+        int(row["player_id"]): {
+            "total_shifts": int(row["total_shifts"]),
+            "qualifying_shifts": int(row["qualifying_shifts"]),
+        }
+        for _, row in counts.iterrows()
+    }
+    _PLAYER_SHIFT_COUNTS_CACHE[season] = out
+    return out
+
+
+def _get_player_shift_summary(season: str, player_id: int) -> dict[str, int]:
+    meta = _get_stint_meta(season)
+    subset = meta[meta["player_id"] == player_id].sort_values(
+        ["game_id", "period", "start_sec"]
+    ).reset_index(drop=True)
+
+    if subset.empty:
+        return {"max_shift_duration": 0}
+
+    subset["end_sec"] = subset["start_sec"] + subset["duration"]
+    prev_end = subset["end_sec"].shift(1)
+    prev_game = subset["game_id"].shift(1)
+    prev_period = subset["period"].shift(1)
+
+    is_new = (
+        (subset["game_id"] != prev_game) |
+        (subset["period"] != prev_period) |
+        ((subset["start_sec"] - prev_end) > SHIFT_GAP_TOLERANCE)
+    )
+    is_new.iloc[0] = True
+    subset["shift_id"] = is_new.cumsum().astype(int)
+
+    shifts = (
+        subset.groupby("shift_id", sort=False)
+        .agg(
+            start_sec=("start_sec", "first"),
+            end_sec=("end_sec", "last"),
+        )
+        .reset_index()
+    )
+    shifts["duration"] = shifts["end_sec"] - shifts["start_sec"]
+    max_shift_duration = int(shifts["duration"].max()) if not shifts.empty else 0
+    return {"max_shift_duration": max_shift_duration}
 
 
 @app.get("/player/{player_id}/stints")

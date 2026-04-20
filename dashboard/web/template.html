@@ -38,8 +38,9 @@ const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
 // ── REAL DATA ────────────────────────────────────────────────────────────────
 const AGES = [0,10,20,30,40,50,60,70,80];
 const PLAYERS    = window.__DATA__.players;
-// players with enough shift-age data to produce a meaningful decay chart
-const CHARTED    = PLAYERS.filter(p => (p.n_decay_buckets || 0) >= 4);
+const MIN_QUALIFYING_SHIFT_SECONDS = window.__DATA__.min_qualifying_shift_seconds ?? 10;
+const MIN_QUALIFYING_SHIFTS = window.__DATA__.min_qualifying_shifts ?? 200;
+const CHARTED    = PLAYERS.filter(p => p.eligible_for_graphs);
 const LINES      = window.__DATA__.lines;
 const LEAGUE_P25 = window.__DATA__.league_p25;
 const LEAGUE_P75 = window.__DATA__.league_p75;
@@ -188,137 +189,146 @@ const TopNav = ({page,setPage,season,onSeasonChange,breadcrumb}) => (
   </div>
 );
 
-// ── DECAY CURVE CHART ─────────────────────────────────────────────────────────
-// Smoothed empirical trend + league P25/P75 band as context baseline.
-// Y-axis auto-scales to fit the player curve; league band anchors the eye.
-function catmullRomPath(pts) {
-  if (pts.length === 0) return '';
-  if (pts.length === 1) return `M ${pts[0][0]} ${pts[0][1]}`;
-  let d = `M ${pts[0][0]} ${pts[0][1]}`;
-  for (let i = 1; i < pts.length; i++) {
-    const p0 = pts[Math.max(0, i-2)];
-    const p1 = pts[i-1];
-    const p2 = pts[i];
-    const p3 = pts[Math.min(pts.length-1, i+1)];
-    const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
-    const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
-    const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
-    const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
-    d += ` C ${cp1x},${cp1y} ${cp2x},${cp2y} ${p2[0]},${p2[1]}`;
-  }
-  return d;
-}
-
-const DecayCurveChart = ({buckets, values, rapmObs, rapmAges, leagueP25, leagueP75, leagueMed, width=600, height=240}) => {
-  const m = {top:18, right:20, bottom:44, left:48};
+// ── PLAYER SHIFT TREND CHART ─────────────────────────────────────────────────
+// Show change from fresh-shift performance so the viewer can see actual decay,
+// not just absolute quality. TOI bars make sample strength obvious by bucket.
+const PlayerShiftTrendChart = ({
+  buckets,
+  deltaValues,
+  rawValues,
+  toiSec,
+  leagueBuckets,
+  leagueDeltaValues,
+  width = 680,
+  height = 280,
+}) => {
+  const m = {top: 18, right: 20, bottom: 62, left: 56};
   const W = width - m.left - m.right;
   const H = height - m.top - m.bottom;
+  const barBand = 46;
+  const lineH = H - barBand;
 
-  const xMax = (buckets && buckets.length > 0) ? Math.max(Math.max(...buckets), 80) : 80;
-  const xTicks = [];
-  for (let t = 0; t <= xMax; t += 10) xTicks.push(t);
+  const pts = (buckets || []).map((bucket, i) => ({
+    bucket,
+    delta: deltaValues?.[i],
+    raw: rawValues?.[i],
+    toi: toiSec?.[i] || 0,
+  })).filter(d => d.delta != null && isFinite(d.delta));
 
-  // Y range: fit player data + league band, always show at least ±2 around median
-  const allV = [
-    ...(values || []),
-    ...(leagueP25 || []),
-    ...(leagueP75 || []),
-  ].filter(v => v != null && isFinite(v));
-  const rawMin = Math.min(...allV);
-  const rawMax = Math.max(...allV);
-  const span   = Math.max(rawMax - rawMin, 3);
-  const pad    = span * 0.18;
-  const yMin   = Math.floor(rawMin - pad);
-  const yMax   = Math.ceil(rawMax  + pad);
-  const range  = yMax - yMin;
-  const step   = range <= 4 ? 1 : range <= 8 ? 2 : range <= 16 ? 4 : 5;
+  const lg = (leagueBuckets || []).map((bucket, i) => ({
+    bucket,
+    delta: leagueDeltaValues?.[i],
+  })).filter(d => d.delta != null && isFinite(d.delta));
+  const leagueMap = new Map(lg.map(d => [d.bucket, d.delta]));
+  const displayPts = pts.sort((a,b) => a.bucket - b.bucket);
+  const tickBuckets = [];
+  const maxBucket = Math.max(...displayPts.map(d => d.bucket), 0);
+  for (let t = 0; t <= maxBucket; t += 10) tickBuckets.push(t);
+  const displayLeague = tickBuckets
+    .map(bucket => ({bucket, delta: leagueMap.get(bucket)}))
+    .filter(d => d.delta != null && isFinite(d.delta));
+  const count = Math.max(tickBuckets.length, 2);
+
+  const allY = [...displayPts.map(d => d.delta), ...displayLeague.map(d => d.delta), 0].filter(v => isFinite(v));
+  const rawMin = allY.length ? Math.min(...allY) : -1;
+  const rawMax = allY.length ? Math.max(...allY) : 1;
+  const span = Math.max(rawMax - rawMin, 1.5);
+  const pad = span * 0.22;
+  const yMin = Math.floor((rawMin - pad) * 2) / 2;
+  const yMax = Math.ceil((rawMax + pad) * 2) / 2;
   const yTicks = [];
-  for (let v = Math.ceil(yMin/step)*step; v <= yMax; v += step) yTicks.push(v);
+  for (let v = yMin; v <= yMax + 0.001; v += 0.5) yTicks.push(Number(v.toFixed(1)));
 
-  const xS    = t => (t / xMax) * W;
-  const yS    = v => H - ((v - yMin) / (yMax - yMin)) * H;
-  const clamp = v => Math.max(yMin, Math.min(yMax, v));
-  const uid   = Math.random().toString(36).slice(2,8);
-  const clipId = `cc-${uid}`;
+  const maxToi = Math.max(...displayPts.map(d => d.toi), 1);
+  const slotW = count > 1 ? W / (count - 1) : W;
+  const xS = i => count === 1 ? W / 2 : i * slotW;
+  const yS = v => lineH - ((v - yMin) / (yMax - yMin)) * lineH;
+  const barH = v => (v / maxToi) * (barBand - 10);
+  const barW = Math.max(18, Math.min(34, slotW * 0.45));
+  const tickIndex = new Map(tickBuckets.map((bucket, i) => [bucket, i]));
 
-  const pts       = (buckets || []).map((t, i) => [xS(t), yS(clamp(values[i]))]);
-  const curvePath = catmullRomPath(pts);
-
-  // league band path: P25 forward then P75 backward (league data only covers 0-80)
-  const bandPath = (leagueP25 && leagueP75 && leagueP25.length > 1)
-    ? AGES.map((t,i) => `${i?'L':'M'} ${xS(t)} ${yS(clamp(leagueP25[i]))}`).join(' ')
-      + ' ' + [...AGES].reverse().map((t,i) => `L ${xS(t)} ${yS(clamp(leagueP75[AGES.length-1-i]))}`).join(' ')
-      + ' Z'
-    : '';
-
-  const medPath = (leagueMed && leagueMed.length > 1)
-    ? AGES.map((t,i) => `${i?'L':'M'} ${xS(t)} ${yS(clamp(leagueMed[i]))}`).join(' ')
-    : '';
+  const playerPath = displayPts.map((d, i) => `${i ? 'L' : 'M'} ${xS(tickIndex.get(d.bucket) ?? i)} ${yS(d.delta)}`).join(' ');
+  const leaguePath = displayLeague.map((d, i) => `${i ? 'L' : 'M'} ${xS(tickIndex.get(d.bucket) ?? i)} ${yS(d.delta)}`).join(' ');
+  const avgShiftIndex = tickBuckets.findIndex(bucket => bucket >= 40);
+  const avgShiftX = avgShiftIndex >= 0 ? xS(avgShiftIndex) : null;
 
   return (
     <div>
-      <svg width={width} height={height} style={{display:'block', overflow:'hidden'}}>
-        <defs>
-          <clipPath id={clipId}><rect x={0} y={0} width={W} height={H}/></clipPath>
-        </defs>
+      <svg width={width} height={height} style={{display:'block', overflow:'visible'}}>
         <g transform={`translate(${m.left},${m.top})`}>
           {yTicks.map(v => (
             <g key={v}>
-              <line x1={0} y1={yS(v)} x2={W} y2={yS(v)} stroke="#f0f0f0" strokeWidth={1}/>
-              <text x={-8} y={yS(v)+4} textAnchor="end" fontSize="11" fill="#bbb" fontFamily="IBM Plex Mono">{v>0?`+${v}`:v}</text>
+              <line x1={0} y1={yS(v)} x2={W} y2={yS(v)} stroke={v === 0 ? '#d1d5db' : '#f1f5f9'} strokeWidth={v === 0 ? 1.5 : 1}/>
+              <text x={-8} y={yS(v)+4} textAnchor="end" fontSize="11" fill={v === 0 ? '#64748b' : '#94a3b8'} fontFamily="IBM Plex Mono">
+                {v > 0 ? `+${v.toFixed(1)}` : v.toFixed(1)}
+              </text>
             </g>
           ))}
-          <text x={-34} y={H/2} textAnchor="middle" fontSize="12" fill="#aaa"
-            transform={`rotate(-90,-34,${H/2})`}>xGD/60</text>
 
-          <g clipPath={`url(#${clipId})`}>
-            {/* league P25–P75 band */}
-            {bandPath && <path d={bandPath} fill="rgba(0,0,0,0.06)"/>}
-            {/* league median */}
-            {medPath  && <path d={medPath}  stroke="#bbb" strokeWidth="1" strokeDasharray="4 3" fill="none"/>}
+          {avgShiftX != null && (
+            <>
+              <line x1={avgShiftX} y1={0} x2={avgShiftX} y2={lineH} stroke="#e5e7eb" strokeDasharray="3 3" strokeWidth="1"/>
+              <text x={avgShiftX+4} y={12} fontSize="9" fill="#9ca3af" fontFamily="IBM Plex Mono">avg shift</text>
+            </>
+          )}
 
-            {/* avg-shift reference */}
-            <line x1={xS(45)} y1={0} x2={xS(45)} y2={H} stroke="#ebebeb" strokeDasharray="3 3" strokeWidth="1"/>
-            <text x={xS(45)+4} y={12} fontSize="9" fill="#ccc" fontFamily="IBM Plex Mono">avg shift</text>
-
-            {/* RAPM model */}
-            {rapmObs && rapmAges && rapmObs.length > 0 && (
-              <path d={rapmObs.map((v,i) => `${i?'L':'M'} ${xS(rapmAges[i])} ${yS(clamp(v))}`).join(' ')}
-                stroke="#8b5cf6" strokeWidth="1.5" strokeDasharray="5 3" fill="none" opacity="0.6"/>
-            )}
-
-            {/* smooth player trend line */}
-            {curvePath && (
-              <path d={curvePath} stroke="#1d4ed8" strokeWidth="2.5" fill="none" strokeLinejoin="round"/>
-            )}
-
-            {/* empirical dots */}
-            {buckets && values && buckets.map((t,i) => {
-              const v = values[i];
-              if (v == null || !isFinite(v)) return null;
-              return <circle key={i} cx={xS(t)} cy={yS(clamp(v))} r="4.5" fill="#1d4ed8" stroke="#fff" strokeWidth="1.5"/>;
-            })}
-          </g>
-
-          {xTicks.map(t => (
-            <text key={t} x={xS(t)} y={H+16} textAnchor="middle" fontSize="11" fill="#bbb" fontFamily="IBM Plex Mono">{t}</text>
+          {displayPts.map((d) => (
+            <g key={`bar-${d.bucket}`}>
+              <rect
+                x={xS(tickIndex.get(d.bucket) ?? 0) - barW/2}
+                y={H - barH(d.toi)}
+                width={barW}
+                height={barH(d.toi)}
+                rx={3}
+                fill="#dbeafe"
+                stroke="#bfdbfe"
+              />
+            </g>
           ))}
-          <text x={W/2} y={H+32} textAnchor="middle" fontSize="12" fill="#aaa">Shift age (seconds)</text>
+
+          {leaguePath && (
+            <path d={leaguePath} stroke="#0f766e" strokeWidth="2" strokeDasharray="6 4" fill="none"/>
+          )}
+          {playerPath && (
+            <path d={playerPath} stroke="#1d4ed8" strokeWidth="3" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+          )}
+
+          {tickBuckets.map((bucket, i) => (
+            <text key={`tick-${bucket}`} x={xS(i)} y={H + 18} textAnchor="middle" fontSize="11" fill="#94a3b8" fontFamily="IBM Plex Mono">
+              {bucket}
+            </text>
+          ))}
+
+          {displayPts.map((d) => (
+            <g key={`pt-${d.bucket}`}>
+              <circle cx={xS(tickIndex.get(d.bucket) ?? 0)} cy={yS(d.delta)} r="4.5" fill="#1d4ed8" stroke="#fff" strokeWidth="1.5"/>
+              <text x={xS(tickIndex.get(d.bucket) ?? 0)} y={H + 33} textAnchor="middle" fontSize="10" fill="#cbd5e1" fontFamily="IBM Plex Mono">
+                {Math.round(d.toi / 60)}m
+              </text>
+            </g>
+          ))}
+
+          <text x={-38} y={lineH/2} textAnchor="middle" fontSize="12" fill="#64748b" transform={`rotate(-90,-38,${lineH/2})`}>
+            Change in xGD/60 vs fresh shift
+          </text>
+          <text x={W/2} y={H + 50} textAnchor="middle" fontSize="12" fill="#64748b">
+            Shift age bucket (seconds) • blue bars show TOI in each bucket
+          </text>
         </g>
       </svg>
-      <div style={{display:'flex',gap:16,alignItems:'center',paddingLeft:m.left,marginTop:4,fontSize:10,color:'#aaa'}}>
+
+      <div style={{display:'flex',gap:16,alignItems:'center',paddingLeft:m.left,marginTop:4,fontSize:10,color:'#94a3b8',flexWrap:'wrap'}}>
         <span style={{display:'flex',alignItems:'center',gap:5}}>
-          <svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#1d4ed8" strokeWidth="2.5"/></svg>
-          player xGD/60
+          <svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#1d4ed8" strokeWidth="3"/></svg>
+          player change from 0–10s bucket
         </span>
         <span style={{display:'flex',alignItems:'center',gap:5}}>
-          <svg width="20" height="10"><rect x="0" y="2" width="20" height="6" fill="rgba(0,0,0,0.08)" rx="1"/>
-            <line x1="0" y1="5" x2="20" y2="5" stroke="#bbb" strokeWidth="1" strokeDasharray="3 2"/></svg>
-          league P25–P75
+          <svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#0f766e" strokeWidth="2" strokeDasharray="6 4"/></svg>
+          league-average change
         </span>
         <span style={{display:'flex',alignItems:'center',gap:5}}>
-          <svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#8b5cf6" strokeWidth="1.5" strokeDasharray="4 2"/></svg>
-          RAPM model
+          <svg width="20" height="10"><rect x="3" y="1" width="14" height="8" rx="2" fill="#dbeafe" stroke="#bfdbfe"/></svg>
+          player TOI by bucket
         </span>
       </div>
     </div>
@@ -472,7 +482,7 @@ const OverviewPage = ({setPage, setSelectedPlayer}) => {
         <p style={{fontSize:13,color:'#888'}}>Shift-age decay analysis across all skaters · 5v5</p>
       </div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:36}}>
-        <KPICard label="Players in sample" value={CHARTED.length} accent="#1d4ed8" sub={`${PLAYERS.length - CHARTED.length} excluded — insufficient shift data`}/>
+        <KPICard label="Players in sample" value={CHARTED.length} accent="#1d4ed8" sub={`${PLAYERS.length - CHARTED.length} excluded — fewer than ${MIN_QUALIFYING_SHIFTS} shifts over ${MIN_QUALIFYING_SHIFT_SECONDS}s`}/>
         <KPICard label="Overuse flags" value={overuseCount} accent={overuseCount>0?'#dc2626':'#16a34a'} sub="bottom 15th pct decay, min 50 min TOI"/>
         <KPICard label="Avg decay coef" value={avgDecay.toFixed(6)} accent="#8b5cf6" sub="negative = worsens with shift age"/>
         <KPICard label="Median break-even" value={fmtBreak(medBE)} accent="#0891b2"/>
@@ -615,7 +625,7 @@ const PlayersPage = ({setPage, setSelectedPlayer}) => {
     <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 24px'}}>
       <div style={{marginBottom:24}}>
         <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:4}}>Player Stat Leaders</h1>
-        <p style={{fontSize:13,color:'#888'}}>5v5 shift-age analysis · Click any player to open their full profile</p>
+        <p style={{fontSize:13,color:'#888'}}>5v5 shift-age analysis · Minimum {MIN_QUALIFYING_SHIFTS} shifts longer than {MIN_QUALIFYING_SHIFT_SECONDS}s · Click any player to open their full profile</p>
       </div>
 
       {!RAPM_READY && (
@@ -920,9 +930,14 @@ const StintsTable = ({player, season}) => {
 const PlayerProfile = ({player, setPage}) => {
   const [empData, setEmpData] = React.useState(null);
   const season = window.__DATA__.current_season;
+  const hasEnoughShiftData = !!player?.eligible_for_graphs;
 
   React.useEffect(() => {
     if (!player) return;
+    if (!player.eligible_for_graphs) {
+      setEmpData({buckets: [], values: [], insufficient: true});
+      return;
+    }
     setEmpData(null);
     fetch(`/player/${player.id}/decay?season=${season}`)
       .then(r => r.json())
@@ -931,11 +946,6 @@ const PlayerProfile = ({player, setPage}) => {
   }, [player?.id, season]);
 
   if (!player) return <div style={{padding:40,color:'#888'}}>No player selected.</div>;
-
-  const rapmMaxAge = (empData && empData.max_age) ? empData.max_age : 80;
-  const rapmAges  = [];
-  for (let t = 0; t <= rapmMaxAge; t += 5) rapmAges.push(t);
-  const rapmObs  = rapmAges.map(t => +(player.base_rapm*42 + player.decay_coef*t*42).toFixed(3));
 
   return (
     <div style={{maxWidth:1140,margin:'0 auto',padding:'32px 24px'}}>
@@ -958,17 +968,30 @@ const PlayerProfile = ({player, setPage}) => {
       {/* Top row: chart + shift breakdown */}
       <div style={{display:'grid',gridTemplateColumns:'1fr 210px',gap:16,marginBottom:16}}>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-          <SectionHeader title="On-Ice xGD/60 by Shift Age"
-            sub="20s rolling window, 5s step (≥20s stints only, ≥60s TOI per window). Grey band = league P25–P75. Dashed = RAPM model."/>
+          <SectionHeader title="Observed Shift Decay"
+            sub="Bucketed directly from 5v5 stint data. Y-axis shows change from this player's 0-10s bucket, so downward movement means real decay. Teal dashed = league-average change. Blue bars = player TOI in each bucket."/>
           {empData === null
-            ? <div style={{height:240,display:'flex',alignItems:'center',justifyContent:'center',color:'#bbb',fontSize:13}}>Loading…</div>
+            ? <div style={{height:280,display:'flex',alignItems:'center',justifyContent:'center',color:'#bbb',fontSize:13}}>Loading…</div>
+            : !hasEnoughShiftData
+              ? <div style={{height:280,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:'#999',fontSize:13,gap:6,textAlign:'center'}}>
+                  <div style={{fontSize:18,fontWeight:700,color:'#777'}}>Not enough data</div>
+                  <div style={{fontSize:12,color:'#aaa'}}>{player.qualifying_shifts_10s || 0} qualifying shifts over {MIN_QUALIFYING_SHIFT_SECONDS}s · minimum {MIN_QUALIFYING_SHIFTS} required</div>
+                </div>
             : empData.buckets.length < 4
-              ? <div style={{height:240,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:'#999',fontSize:13,gap:6,textAlign:'center'}}>
+              ? <div style={{height:280,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:'#999',fontSize:13,gap:6,textAlign:'center'}}>
                   <div style={{fontSize:14,fontWeight:600,color:'#777'}}>Not enough data for a reliable curve</div>
                   <div style={{fontSize:12,color:'#aaa'}}>{player.toi_min} min 5v5 TOI · insufficient shift-age coverage</div>
                 </div>
-              : <DecayCurveChart buckets={empData.buckets} values={empData.values} rapmObs={rapmObs} rapmAges={rapmAges}
-                  leagueP25={LEAGUE_P25} leagueP75={LEAGUE_P75} leagueMed={LEAGUE_MED} width={680} height={240}/>
+              : <PlayerShiftTrendChart
+                  buckets={empData.buckets}
+                  deltaValues={empData.delta_values}
+                  rawValues={empData.values}
+                  toiSec={empData.toi_sec}
+                  leagueBuckets={empData.league?.buckets || []}
+                  leagueDeltaValues={empData.league?.delta_values || []}
+                  width={680}
+                  height={280}
+                />
           }
         </div>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
@@ -1113,7 +1136,7 @@ const LinesPage = () => {
 const TeamReportPage = ({setPage, setSelectedPlayer}) => {
   const [team, setTeam] = useState(TEAMS[0]||'');
   const [tip, setTip] = useState(null);
-  const roster = PLAYERS.filter(p=>p.team===team).sort((a,b)=>b.toi_min-a.toi_min);
+  const roster = CHARTED.filter(p=>p.team===team).sort((a,b)=>b.toi_min-a.toi_min);
   const flags = roster.filter(p=>p.flagged).length;
   const avgD  = roster.length ? (roster.reduce((s,p)=>s+p.decay_coef,0)/roster.length).toFixed(6) : 'N/A';
   const breaks = roster.filter(p=>p.breakeven!=null).map(p=>p.breakeven).sort((a,b)=>a-b);
@@ -1185,7 +1208,7 @@ const TeamReportPage = ({setPage, setSelectedPlayer}) => {
 
       {/* KPI row */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:24}}>
-        <KPICard label="Players in sample" value={roster.length} accent="#1d4ed8"/>
+        <KPICard label="Players in sample" value={roster.length} accent="#1d4ed8" sub={`Minimum ${MIN_QUALIFYING_SHIFTS} shifts over ${MIN_QUALIFYING_SHIFT_SECONDS}s`}/>
         <KPICard label="Overuse-risk skaters" value={flags} sub="Bottom 15% decay among high-TOI players" accent={flags>0?'#dc2626':'#16a34a'}/>
         <KPICard label="Team avg decay" value={avgD} accent="#8b5cf6"/>
         <KPICard label="Median break-even" value={medB} accent="#0891b2"/>
