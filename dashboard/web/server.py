@@ -54,7 +54,7 @@ def _pct_ranks(values: list[float], higher_is_better: bool = True) -> list[int]:
 def _break_even(base: float, decay: float) -> int | None:
     """Seconds into a shift when projected xGD/60 crosses zero.
     Only meaningful when a player starts positive (base > 0) and fades (decay < 0).
-    Returns None ('Never') for everyone else — positive decay or negative base."""
+    Returns None ('Never') for everyone else: positive decay or negative base."""
     if decay < -0.00002 and base > 0:
         return int(round(-base / decay))
     return None
@@ -75,13 +75,43 @@ def _has_rapm(season: str) -> bool:
     return (cfg.paths.processed / f"rapm_results_{season}.parquet").exists()
 
 
-def _build_data(season: str) -> dict:
-    import pandas as pd
-    import numpy as np
+def _window_overlap_stats(
+    df,
+    start_age: float,
+    end_age: float | None = None,
+) -> dict[str, float]:
+    toi_sec = 0.0
+    xg_for = 0.0
+    xg_against = 0.0
 
-    rapm_path = cfg.paths.processed / f"rapm_results_{season}.parquet"
-    if not rapm_path.exists():
-        # stints may exist — still serve lines and empty player list with a flag
+    for row in df.itertuples(index=False):
+        seg_start = float(getattr(row, "shift_age"))
+        seg_end = seg_start + float(getattr(row, "duration"))
+        win_end = seg_end if end_age is None else float(end_age)
+        overlap = min(seg_end, win_end) - max(seg_start, float(start_age))
+        if overlap <= 0:
+            continue
+        duration = float(getattr(row, "duration"))
+        frac = overlap / duration if duration > 0 else 0.0
+        toi_sec += overlap
+        xg_for += float(getattr(row, "p_xgf")) * frac
+        xg_against += float(getattr(row, "p_xga")) * frac
+
+    xgd60 = None
+    if toi_sec > 0:
+        xgd60 = (xg_for - xg_against) / toi_sec * 3600
+
+    return {
+        "toi_sec": toi_sec,
+        "xgd60": xgd60,
+    }
+
+
+def _build_data(season: str) -> dict:
+    import numpy as np
+    try:
+        idx = _get_stint_meta(season)
+    except Exception:
         return {
             "players": [], "lines": _build_lines(season),
             "league_p25": [], "league_p75": [], "league_med": [],
@@ -89,85 +119,83 @@ def _build_data(season: str) -> dict:
             "rapm_ready": False,
         }
 
-    rapm = pd.read_parquet(rapm_path)
-    # filter out players with insufficient playing time before any analysis
-    rapm = rapm[rapm["toi_5v5"] >= MIN_TOI_MIN].copy()
+    if idx.empty:
+        return {
+            "players": [], "lines": _build_lines(season),
+            "league_p25": [], "league_p75": [], "league_med": [],
+            "seasons": _available_seasons(), "current_season": season,
+            "rapm_ready": False,
+        }
+
     name_map = get_cached_names()
     shift_counts = _get_player_shift_counts(season)
+    qualified_idx = idx[idx["duration"] >= MIN_QUALIFYING_SHIFT_SECONDS].copy()
 
     # ── PLAYERS ───────────────────────────────────────────────────────────────
     players = []
-    for _, row in rapm.iterrows():
-        base  = float(row["rapm_base"])
-        decay = float(row["rapm_decay"])
-        obs   = [round(base * 42 + decay * t * 42, 2) for t in AGES]
-        early = round((obs[0]+obs[1]+obs[2]+obs[3]) / 4, 2)
-        late  = round((obs[5]+obs[6]+obs[7]) / 3, 2)
-        drop  = round(late - early, 2)
-        pid   = int(row["player_id"])
+    for pid, subset in idx.groupby("player_id"):
+        pid = int(pid)
+        total_toi_sec = float(subset["duration"].sum())
+        if total_toi_sec < MIN_TOI_MIN * 60:
+            continue
+
+        xgd60 = (float(subset["p_xgf"].sum()) - float(subset["p_xga"].sum())) / total_toi_sec * 3600
+        qualified_subset = qualified_idx[qualified_idx["player_id"] == pid].copy()
+        early_stats = _window_overlap_stats(qualified_subset, 0, 30)
+        mid_stats = _window_overlap_stats(qualified_subset, 30, 45)
+        late_stats = _window_overlap_stats(qualified_subset, 45, None)
+        early = float(early_stats["xgd60"]) if early_stats["xgd60"] is not None else 0.0
+        mid = float(mid_stats["xgd60"]) if mid_stats["xgd60"] is not None else 0.0
+        late = float(late_stats["xgd60"]) if late_stats["xgd60"] is not None else 0.0
+        drop = late - early
         info  = name_map.get(pid, {})
         counts = shift_counts.get(pid, {})
         qualifying_shifts = int(counts.get("qualifying_shifts", 0))
         total_shifts = int(counts.get("total_shifts", 0))
         players.append({
             "id":         pid,
-            "name":       str(row.get("player_name", info.get("name", f"Player_{pid}"))),
-            "team":       str(row.get("team", info.get("team", "?"))),
+            "name":       str(info.get("name", f"Player_{pid}")),
+            "team":       str(info.get("team", "?")),
             "pos":        str(info.get("position", "F")),
-            "base_rapm":  round(base, 4),
-            "decay_coef": round(decay, 6),
-            "toi_min":    round(float(row["toi_5v5"]), 1),
+            "overall_xgd": round(xgd60, 2),
+            "durability": round(drop, 2),
+            "base_rapm": round(xgd60, 2),
+            "decay_coef": round(drop, 2),
+            "toi_min":    round(total_toi_sec / 60, 1),
             "stints":     total_shifts,
             "qualifying_shifts_10s": qualifying_shifts,
             "eligible_for_graphs": qualifying_shifts >= MIN_QUALIFYING_SHIFTS,
-            "breakeven":  _break_even(base, decay),
-            "obs":        obs,
-            "early":      early,
-            "late":       late,
-            "drop":       drop,
+            "breakeven":  None,
+            "early":      round(early, 2),
+            "mid":        round(mid, 2),
+            "late":       round(late, 2),
+            "drop":       round(drop, 2),
             "flagged":    False,  # recomputed below from actual distribution
         })
 
-    # recompute overuse flag: bottom OVERUSE_DECAY_PCT of decay among players
-    # with enough TOI. The R model's threshold is in wrong units so we ignore it.
+    # bottom OVERUSE_DECAY_PCT of empirical durability among higher-TOI players
     if players:
-        eligible_decays = [p["decay_coef"] for p in players if p["toi_min"] >= OVERUSE_TOI_MIN]
-        if eligible_decays:
-            threshold = float(np.percentile(eligible_decays, OVERUSE_DECAY_PCT))
+        eligible_drops = [p["drop"] for p in players if p["toi_min"] >= OVERUSE_TOI_MIN]
+        if eligible_drops:
+            threshold = float(np.percentile(eligible_drops, OVERUSE_DECAY_PCT))
             for p in players:
-                p["flagged"] = p["toi_min"] >= OVERUSE_TOI_MIN and p["decay_coef"] <= threshold
+                p["flagged"] = p["toi_min"] >= OVERUSE_TOI_MIN and p["drop"] <= threshold
 
     if players:
-        pct_rapm  = _pct_ranks([p["base_rapm"]  for p in players], True)
-        pct_decay = _pct_ranks([p["decay_coef"] for p in players], True)
-        pct_early = _pct_ranks([p["early"]      for p in players], True)
-        pct_late  = _pct_ranks([p["late"]       for p in players], True)
+        pct_overall = _pct_ranks([p["overall_xgd"] for p in players], True)
         pct_drop  = _pct_ranks([p["drop"]       for p in players], True)
+        pct_early = _pct_ranks([p["early"]      for p in players], True)
+        pct_mid   = _pct_ranks([p["mid"]        for p in players], True)
+        pct_late  = _pct_ranks([p["late"]       for p in players], True)
         pct_toi   = _pct_ranks([p["toi_min"]    for p in players], True)
         for i, p in enumerate(players):
-            p["pct_rapm"]  = pct_rapm[i]
-            p["pct_decay"] = pct_decay[i]
+            p["pct_overall"] = pct_overall[i]
             p["pct_early"] = pct_early[i]
+            p["pct_mid"]   = pct_mid[i]
             p["pct_late"]  = pct_late[i]
             p["pct_drop"]  = pct_drop[i]
             p["pct_toi"]   = pct_toi[i]
-
-    try:
-        idx = _get_player_index(season)
-        idx2 = idx.copy()
-        idx2["shift_bucket"] = (idx2["shift_age"] // 10) * 10
-        idx2["shift_bucket"] = idx2["shift_bucket"].clip(upper=90)
-        bstats = idx2.groupby(["player_id", "shift_bucket"]).agg(
-            toi_sec=("duration", "sum"),
-            n_stints=("duration", "count"),
-        ).reset_index()
-        qual   = bstats[(bstats["toi_sec"] >= 120) & (bstats["n_stints"] >= 5)]
-        bcnt   = qual.groupby("player_id").size().to_dict()
-
-        for p in players:
-            p["n_decay_buckets"] = int(bcnt.get(p["id"], 0))
-    except Exception:
-        pass
+            p["pct_durability"] = pct_drop[i]
 
     # ── LEAGUE BANDS ─────────────────────────────────────────────────────────
     league_p25 = [-1.9 - 0.006*t for t in AGES]

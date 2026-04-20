@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Shift Decay RAPM</title>
+<title>Shift Decay xGD/60</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
@@ -83,12 +83,11 @@ function pctBg(pct) {
   return `rgb(${Math.round(lerp(255,29,s))},${Math.round(lerp(255,100,s))},${Math.round(lerp(255,220,s))})`;
 }
 function pctFg(pct) { return (pct<18||pct>82)?'#fff':'#222'; }
-const fmt = (v,d=2) => v==null?'—':(v>0?'+':'')+Number(v).toFixed(d);
-const fmtNoSign = (v,d=2) => v==null?'—':Number(v).toFixed(d);
-const fmtBreak = (v) => v==null?'Never':v>200?'>200s':v+'s';
+const fmt = (v,d=2) => v==null?'N/A':(v>0?'+':'')+Number(v).toFixed(d);
+const fmtNoSign = (v,d=2) => v==null?'N/A':Number(v).toFixed(d);
 const overuseCount = CHARTED.filter(p=>p.flagged).length;
-const avgDecay = CHARTED.length ? (CHARTED.reduce((s,p)=>s+p.decay_coef,0)/CHARTED.length) : 0;
-const medBreak = CHARTED.filter(p=>p.breakeven!=null).map(p=>p.breakeven).sort((a,b)=>a-b);
+const avgDurability = CHARTED.length ? (CHARTED.reduce((s,p)=>s+p.drop,0)/CHARTED.length) : 0;
+const avgOverallXgd = CHARTED.length ? (CHARTED.reduce((s,p)=>s+p.overall_xgd,0)/CHARTED.length) : 0;
 
 // ── SHARED COMPONENTS ────────────────────────────────────────────────────────
 const KPICard = ({label, value, sub, accent}) => (
@@ -159,7 +158,7 @@ const TopNav = ({page,setPage,season,onSeasonChange,breadcrumb}) => (
   <div style={{background:'#fff',borderBottom:'1px solid #e5e5e5',position:'sticky',top:0,zIndex:100}}>
     <div style={{maxWidth:1200,margin:'0 auto',padding:'0 24px',display:'flex',alignItems:'center',gap:0,height:52}}>
       <div style={{fontWeight:700,fontSize:14,letterSpacing:'-0.01em',marginRight:32,color:'#111',whiteSpace:'nowrap'}}>
-        <span style={{color:'#1d4ed8'}}>⬡</span> Shift Decay RAPM
+        <span style={{color:'#1d4ed8'}}>⬡</span> Shift Decay xGD/60
       </div>
       {NAV_PAGES.map(p=>(
         <button key={p} onClick={()=>setPage(p)} style={{
@@ -335,12 +334,15 @@ const PlayerShiftTrendChart = ({
   );
 };
 
-// ── HISTOGRAM (decay coef distribution) ──────────────────────────────────────
+// ── HISTOGRAM (durability distribution) ──────────────────────────────────────
 const Histogram = ({players, width=360, height=190}) => {
   const m = {top:12,right:12,bottom:50,left:48};
   const W = width-m.left-m.right, H = height-m.top-m.bottom;
-  const vals = players.map(p=>p.decay_coef);
-  const min=-0.0008, max=0.0005, bins=14;
+  const vals = players.map(p=>p.drop);
+  const min = Math.min(...vals, -4);
+  const max = Math.max(...vals, 2);
+  const avg = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : 0;
+  const bins=14;
   const step=(max-min)/bins;
   const counts = Array(bins).fill(0);
   vals.forEach(v=>{ const i=Math.min(bins-1,Math.floor((v-min)/step)); if(i>=0) counts[i]++; });
@@ -355,31 +357,31 @@ const Histogram = ({players, width=360, height=190}) => {
         {counts.map((c,i)=>(
           <rect key={i} x={xS(i)+0.5} y={yS(c)} width={barW} height={H-yS(c)} fill={pctBg(pcts[i])} opacity="0.9"/>
         ))}
-        {/* zero line */}
-        <line x1={((-min)/(max-min))*W} y1={0} x2={((-min)/(max-min))*W} y2={H+4} stroke="#c00" strokeWidth="1.5" strokeDasharray="4 2"/>
-        <text x={((-min)/(max-min))*W} y={H+16} textAnchor="middle" fontSize="10" fill="#c00" fontFamily="IBM Plex Mono">0</text>
-        {[-0.0006,-0.0003,0,0.0003].map((v,i)=>(
-          <text key={i} x={((v-min)/(max-min))*W} y={H+28} textAnchor="middle" fontSize="10" fill="#999" fontFamily="IBM Plex Mono">{v.toFixed(4)}</text>
+        {/* average line */}
+        <line x1={((avg-min)/(max-min))*W} y1={0} x2={((avg-min)/(max-min))*W} y2={H+4} stroke="#c00" strokeWidth="1.5" strokeDasharray="4 2"/>
+        <text x={((avg-min)/(max-min))*W} y={H+16} textAnchor="middle" fontSize="10" fill="#c00" fontFamily="IBM Plex Mono">avg</text>
+        {[min, (min+max)/2, max].map((v,i)=>(
+          <text key={i} x={((v-min)/(max-min))*W} y={H+28} textAnchor="middle" fontSize="10" fill="#999" fontFamily="IBM Plex Mono">{v.toFixed(1)}</text>
         ))}
         {[0,Math.round(maxC/2),maxC].map((c,i)=>(
           <text key={i} x={-6} y={yS(c)+4} textAnchor="end" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{c}</text>
         ))}
         {/* axis labels */}
-        <text x={W/2} y={H+44} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif">Decay coefficient (per second of shift age)</text>
+        <text x={W/2} y={H+44} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif">Durability (late xGD/60 minus early xGD/60)</text>
         <text x={-36} y={H/2} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif" transform={`rotate(-90,-36,${H/2})`}>Players</text>
       </g>
     </svg>
   );
 };
 
-// ── SCATTER (Base RAPM vs Decay) ──────────────────────────────────────────────
+// ── SCATTER (Overall xGD vs Durability) ──────────────────────────────────────
 const ScatterPlot = ({players, onSelect, reg, width=360, height=190}) => {
   const [tip, setTip] = React.useState(null);
   const m = {top:12,right:12,bottom:50,left:52};
   const W=width-m.left-m.right, H=height-m.top-m.bottom;
-  const xs=players.map(p=>p.decay_coef), ys=players.map(p=>p.base_rapm);
-  const xMin=Math.min(...xs)-0.00005, xMax=Math.max(...xs)+0.00005;
-  const yMin=Math.min(...ys)-0.005, yMax=Math.max(...ys)+0.005;
+  const xs=players.map(p=>p.drop), ys=players.map(p=>p.overall_xgd);
+  const xMin=Math.min(...xs)-0.2, xMax=Math.max(...xs)+0.2;
+  const yMin=Math.min(...ys)-0.2, yMax=Math.max(...ys)+0.2;
   const xS=v=>((v-xMin)/(xMax-xMin))*W;
   const yS=v=>H-((v-yMin)/(yMax-yMin))*H;
   const rl_y1 = reg.slope*xMin + reg.intercept;
@@ -399,18 +401,18 @@ const ScatterPlot = ({players, onSelect, reg, width=360, height=190}) => {
           <line x1={xS(xMin)} y1={yS(rl_y1)} x2={xS(xMax)} y2={yS(rl_y2)}
             stroke="#8b5cf6" strokeWidth="1.8" strokeDasharray="6 3" opacity="0.85"/>
           {players.map(p=>(
-            <circle key={p.id} cx={xS(p.decay_coef)} cy={yS(p.base_rapm)} r="5"
+            <circle key={p.id} cx={xS(p.drop)} cy={yS(p.overall_xgd)} r="5"
               fill={p.flagged?'#dc2626':'#1d4ed8'} opacity="0.7" stroke="#fff" strokeWidth="1"
               onClick={()=>onSelect(p)} style={{cursor:'pointer'}}
               onMouseEnter={e=>handleMove(e,p)}
               onMouseMove={e=>handleMove(e,p)}
               onMouseLeave={()=>setTip(null)}/>
           ))}
-          {[-0.0006,-0.0003,0,0.0003].map((v,i)=>(
-            <text key={i} x={xS(v)} y={H+20} textAnchor="middle" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{v.toFixed(4)}</text>
+          {[xMin+(xMax-xMin)*0.25, xMin+(xMax-xMin)*0.5, xMin+(xMax-xMin)*0.75].map((v,i)=>(
+            <text key={i} x={xS(v)} y={H+20} textAnchor="middle" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{v.toFixed(1)}</text>
           ))}
-          <text x={W/2} y={H+44} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif">Decay coefficient (per second of shift age)</text>
-          <text x={-40} y={H/2} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif" transform={`rotate(-90,-40,${H/2})`}>Base RAPM (xGD/60 at shift start)</text>
+          <text x={W/2} y={H+44} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif">Durability (late xGD/60 minus early xGD/60)</text>
+          <text x={-40} y={H/2} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif" transform={`rotate(-90,-40,${H/2})`}>Overall xGD/60</text>
         </g>
       </svg>
       {/* Legend row outside SVG so it never overlaps data */}
@@ -446,10 +448,10 @@ const ScatterPlot = ({players, onSelect, reg, width=360, height=190}) => {
         }}>
           <div style={{fontWeight:600,marginBottom:3}}>{tip.p.name} <span style={{opacity:0.6,fontWeight:400}}>({tip.p.team})</span></div>
           <div style={{fontFamily:'IBM Plex Mono',fontSize:11,color:'#a5b4fc'}}>
-            Base RAPM: <span style={{color:'#fff'}}>{tip.p.base_rapm.toFixed(4)}</span>
+            Overall xGD/60: <span style={{color:'#fff'}}>{tip.p.overall_xgd.toFixed(2)}</span>
           </div>
           <div style={{fontFamily:'IBM Plex Mono',fontSize:11,color:'#a5b4fc'}}>
-            Decay: <span style={{color:'#fff'}}>{tip.p.decay_coef.toFixed(6)}</span>
+            Durability: <span style={{color:'#fff'}}>{tip.p.drop.toFixed(2)}</span>
           </div>
         </div>
       )}
@@ -459,59 +461,57 @@ const ScatterPlot = ({players, onSelect, reg, width=360, height=190}) => {
 
 // ── OVERVIEW PAGE ─────────────────────────────────────────────────────────────
 const OverviewPage = ({setPage, setSelectedPlayer}) => {
-  const sorted_decay = [...CHARTED].sort((a,b)=>a.decay_coef-b.decay_coef).slice(0,12);
-  const sorted_rapm  = [...CHARTED].sort((a,b)=>b.base_rapm-a.base_rapm).slice(0,10);
-  const medBE = medBreak.length?medBreak[Math.floor(medBreak.length/2)]:null;
+  const sorted_decay = [...CHARTED].sort((a,b)=>a.drop-b.drop).slice(0,12);
+  const sorted_overall  = [...CHARTED].sort((a,b)=>b.overall_xgd-a.overall_xgd).slice(0,10);
 
   const openPlayer = (p) => { setSelectedPlayer(p); setPage('profile'); };
 
   return (
     <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 24px'}}>
-      {!RAPM_READY && (
-        <div style={{marginBottom:24,padding:'12px 16px',background:'#fefce8',border:'1px solid #fde68a',borderRadius:6,fontSize:13,color:'#92400e',display:'flex',alignItems:'center',gap:10}}>
-          <span style={{fontSize:16}}>⏳</span>
-          <div>
-            <strong>RAPM model not yet computed for this season.</strong>
-            {' '}Stint data is ready. Run <code style={{background:'#fef3c7',padding:'1px 5px',borderRadius:3,fontSize:12}}>python3.11 -m src.features.export_matrix --season {window.__DATA__.current_season}</code>
-            {' '}then <code style={{background:'#fef3c7',padding:'1px 5px',borderRadius:3,fontSize:12}}>Rscript r/rapm/rapm_model.R --season {window.__DATA__.current_season}</code> to unlock player stats.
-          </div>
-        </div>
-      )}
       <div style={{marginBottom:28}}>
         <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:4}}>League Overview</h1>
         <p style={{fontSize:13,color:'#888'}}>Shift-age decay analysis across all skaters · 5v5</p>
       </div>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:36}}>
-        <KPICard label="Players in sample" value={CHARTED.length} accent="#1d4ed8" sub={`${PLAYERS.length - CHARTED.length} excluded — fewer than ${MIN_QUALIFYING_SHIFTS} shifts over ${MIN_QUALIFYING_SHIFT_SECONDS}s`}/>
-        <KPICard label="Overuse flags" value={overuseCount} accent={overuseCount>0?'#dc2626':'#16a34a'} sub="bottom 15th pct decay, min 50 min TOI"/>
-        <KPICard label="Avg decay coef" value={avgDecay.toFixed(6)} accent="#8b5cf6" sub="negative = worsens with shift age"/>
-        <KPICard label="Median break-even" value={fmtBreak(medBE)} accent="#0891b2"/>
+      <div style={{background:'#f8f9ff',border:'1px solid #dde4f5',borderRadius:6,padding:'18px 20px',marginBottom:36}}>
+        <div style={{fontSize:12,fontWeight:700,color:'#1d4ed8',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:10}}>How To Read xGD/60</div>
+        <div style={{display:'grid',gridTemplateColumns:'1.2fr 1fr 1.3fr',gap:18,fontSize:12,color:'#374151',lineHeight:1.7}}>
+          <div>
+            <span style={{fontWeight:700,color:'#111'}}>What it is:</span> xGD/60 means expected goals differential per 60 minutes.
+            It estimates whether a player's team is creating more expected goals than it allows while he is on the ice at 5v5.
+          </div>
+          <div>
+            <span style={{fontWeight:700,color:'#111'}}>How to read it:</span> Positive values are good, negative values are bad, and bigger positive numbers mean stronger territorial and chance-quality results.
+          </div>
+          <div>
+            <span style={{fontWeight:700,color:'#111'}}>How this site calculates it:</span> We sum on-ice 5v5 expected goals for and against from tracked shift segments, take `xGF - xGA`, divide by on-ice time, and scale to 60 minutes. Early, middle, and late xGD/60 use the same calculation inside their shift-age windows.
+          </div>
+        </div>
       </div>
 
       <div style={{display:'flex',flexDirection:'column',gap:20,marginBottom:36}}>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px 24px 16px'}}>
-          <SectionHeader title="Distribution of Decay Coefficients" sub="How many skaters fall into each decay rate bucket. A negative decay coefficient means a player's projected impact drops as the shift ages."/>
+          <SectionHeader title="Distribution of Durability" sub="How many skaters land in each early-to-late change bucket. Negative values mean the player fades as the shift ages."/>
           <div style={{display:'flex',gap:16,alignItems:'flex-start',marginTop:4,marginBottom:10}}>
             <div style={{fontSize:11,color:'#888',lineHeight:1.5,maxWidth:480}}>
-              <span style={{fontWeight:600,color:'#555'}}>X-axis:</span> Decay coefficient — values left of 0 (red dashed line) mean the player gets worse as their shift ages; values right of 0 mean they improve.<br/>
+              <span style={{fontWeight:600,color:'#555'}}>X-axis:</span> Durability: late xGD/60 minus early xGD/60. Values left of 0 mean the player gets worse as the shift ages; values right of 0 mean they improve.<br/>
               <span style={{fontWeight:600,color:'#555'}}>Y-axis:</span> Number of players in that bucket.<br/>
-              <span style={{fontWeight:600,color:'#555'}}>Color:</span> Red = high decay (negative), blue = low decay (positive).
+              <span style={{fontWeight:600,color:'#555'}}>Color:</span> Red = bigger fade, blue = better durability.
             </div>
           </div>
           <Histogram players={CHARTED} width={1100} height={220}/>
         </div>
 
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px 24px 16px'}}>
-          <SectionHeader title="Base RAPM vs. Decay Rate" sub="Does a player's baseline quality predict how quickly they fade within a shift? Each dot is one skater. Click to open their profile."/>
+          <SectionHeader title="Overall xGD/60 vs. Durability" sub="Does overall impact predict how well a player holds up as the shift ages? Each dot is one skater. Click to open their profile."/>
           <div style={{fontSize:11,color:'#888',lineHeight:1.5,maxWidth:640,marginTop:4,marginBottom:10}}>
-            <span style={{fontWeight:600,color:'#555'}}>X-axis:</span> Decay coefficient — how fast the player's impact changes per second of shift age (negative = fades, positive = improves).<br/>
-            <span style={{fontWeight:600,color:'#555'}}>Y-axis:</span> Base RAPM — the player's estimated 5v5 impact at the start of a fresh shift, in xG differential per 60.<br/>
+            <span style={{fontWeight:600,color:'#555'}}>X-axis:</span> Durability: late xGD/60 minus early xGD/60 (negative = fades, positive = holds up).<br/>
+            <span style={{fontWeight:600,color:'#555'}}>Y-axis:</span> Overall xGD/60: the player's total observed 5v5 impact across all qualifying shift segments.<br/>
             <span style={{fontWeight:600,color:'#555'}}>Purple line:</span> OLS trend across all players.
             <span style={{color:'#dc2626',fontWeight:600,marginLeft:12}}>Red dots</span> = overuse-flagged.
           </div>
           {(() => {
-            const xs = CHARTED.map(p=>p.decay_coef);
-            const ys = CHARTED.map(p=>p.base_rapm);
+            const xs = CHARTED.map(p=>p.drop);
+            const ys = CHARTED.map(p=>p.overall_xgd);
             const reg = ols(xs, ys);
             return <>
               <ScatterPlot players={CHARTED} onSelect={openPlayer} reg={reg} width={1100} height={260}/>
@@ -520,7 +520,7 @@ const OverviewPage = ({setPage, setSelectedPlayer}) => {
                 <span style={{color:'#c4b5fd'}}>·</span>
                 <span style={{fontFamily:'IBM Plex Mono',fontWeight:600}}>R² = {reg.r2.toFixed(3)}</span>
                 <span style={{color:'#c4b5fd'}}>·</span>
-                <span>{reg.r < 0 ? 'Higher decay (more negative) correlates with lower base RAPM — durable players tend to be better.' : 'Higher base RAPM correlates with higher decay rate.'}</span>
+                <span>{reg.r > 0 ? 'Players with stronger overall xGD/60 also tend to hold up better late in shifts.' : 'Overall xGD/60 and durability do not move together strongly in this sample.'}</span>
               </div>
             </>;
           })()}
@@ -529,34 +529,34 @@ const OverviewPage = ({setPage, setSelectedPlayer}) => {
 
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:24}}>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-          <SectionHeader title="Most Overused Players" sub="Fastest decay, minimum 50 min TOI. Click name to view profile."/>
+          <SectionHeader title="Most Overused Players" sub="Worst empirical durability, minimum 50 min TOI. Click name to view profile."/>
           <table>
             <thead><tr>
-              <th style={{textAlign:'left'}}>Player</th><th>Team</th><th>Base RAPM</th><th>Decay</th><th>TOI</th><th>Break-even</th>
+              <th style={{textAlign:'left'}}>Player</th><th>Team</th><th>Overall xGD</th><th>Durability</th><th>TOI</th><th>Late xGD</th>
             </tr></thead>
             <tbody>{sorted_decay.map(p=>(
               <tr key={p.id}>
                 <td><button onClick={()=>openPlayer(p)} style={{color:'#1d4ed8',fontWeight:600,fontSize:13,textAlign:'left'}}>{p.name}</button></td>
                 <td style={{textAlign:'center'}}><Tag>{p.team}</Tag></td>
-                <PctCell pct={p.pct_rapm} value={fmt(p.base_rapm,4)}/>
-                <PctCell pct={p.pct_decay} value={p.decay_coef.toFixed(6)}/>
+                <PctCell pct={p.pct_overall} value={fmt(p.overall_xgd,2)}/>
+                <PctCell pct={p.pct_durability} value={fmt(p.drop,2)}/>
                 <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{p.toi_min}</td>
-                <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{fmtBreak(p.breakeven)}</td>
+                <PctCell pct={p.pct_late} value={fmt(p.late,2)}/>
               </tr>
             ))}</tbody>
           </table>
         </div>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-          <SectionHeader title="Top Performers by Base RAPM" sub="Best baseline value regardless of decay."/>
+          <SectionHeader title="Top Performers by Overall xGD/60" sub="Best observed 5v5 impact across all qualifying shift segments."/>
           <table>
             <thead><tr>
-              <th style={{textAlign:'left'}}>Player</th><th>Pos</th><th>Base RAPM</th><th>Early xGD</th><th>Late xGD</th><th>TOI</th>
+              <th style={{textAlign:'left'}}>Player</th><th>Pos</th><th>Overall xGD</th><th>Early xGD</th><th>Late xGD</th><th>TOI</th>
             </tr></thead>
-            <tbody>{sorted_rapm.map(p=>(
+            <tbody>{sorted_overall.map(p=>(
               <tr key={p.id}>
                 <td><button onClick={()=>openPlayer(p)} style={{color:'#1d4ed8',fontWeight:600,fontSize:13}}>{p.name}</button></td>
                 <td style={{textAlign:'center',color:'#888',fontSize:12}}>{p.pos}</td>
-                <PctCell pct={p.pct_rapm} value={fmt(p.base_rapm,4)}/>
+                <PctCell pct={p.pct_overall} value={fmt(p.overall_xgd,2)}/>
                 <PctCell pct={p.pct_early} value={fmt(p.early)}/>
                 <PctCell pct={p.pct_late} value={fmt(p.late)}/>
                 <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{p.toi_min}</td>
@@ -576,18 +576,12 @@ const PlayersPage = ({setPage, setSelectedPlayer}) => {
   const openPlayer = (p) => { setSelectedPlayer(p); setPage('profile'); };
 
   const searchResults = query
-    ? [...CHARTED]
+    ? [...PLAYERS]
         .filter(p => p.name.toLowerCase().includes(query) || p.team.toLowerCase().includes(query))
-        .sort((a,b) => b.base_rapm - a.base_rapm)
+        .sort((a,b) => b.toi_min - a.toi_min)
     : null;
 
   const boards = [
-    {
-      title: 'Top Base RAPM',
-      desc: 'Best overall on-ice impact isolated via ridge regression. Represents xGD/60 at the start of a fresh shift, independent of linemates.',
-      players: [...CHARTED].sort((a,b)=>b.base_rapm-a.base_rapm).slice(0,10),
-      stat: p => fmt(p.base_rapm,4), label: 'RAPM', pct: p => p.pct_rapm,
-    },
     {
       title: 'Best Early Impact',
       desc: 'Highest xGD/60 in the first 30 seconds on ice. Who dominates immediately off a fresh change.',
@@ -595,10 +589,22 @@ const PlayersPage = ({setPage, setSelectedPlayer}) => {
       stat: p => fmt(p.early,2), label: 'Early', pct: p => p.pct_early,
     },
     {
+      title: 'Best Middle Impact',
+      desc: 'Highest xGD/60 from 30 to 45 seconds on ice. Who stays dangerous through the middle of a shift.',
+      players: [...CHARTED].sort((a,b)=>b.mid-a.mid).slice(0,10),
+      stat: p => fmt(p.mid,2), label: 'Mid', pct: p => p.pct_mid,
+    },
+    {
       title: 'Best Late Impact',
-      desc: 'Highest xGD/60 after 45+ seconds on ice. Who holds up as their shift stales — a rare and valuable trait.',
+      desc: 'Highest xGD/60 after 45+ seconds on ice. Who holds up as their shift stales, a rare and valuable trait.',
       players: [...CHARTED].sort((a,b)=>b.late-a.late).slice(0,10),
       stat: p => fmt(p.late,2), label: 'Late', pct: p => p.pct_late,
+    },
+    {
+      title: 'Top Overall xGD/60',
+      desc: 'Best observed 5v5 impact across all qualifying shift segments.',
+      players: [...CHARTED].sort((a,b)=>b.overall_xgd-a.overall_xgd).slice(0,10),
+      stat: p => fmt(p.overall_xgd,2), label: 'xGD', pct: p => p.pct_overall,
     },
     {
       title: 'Most Durable',
@@ -607,17 +613,10 @@ const PlayersPage = ({setPage, setSelectedPlayer}) => {
       stat: p => fmt(p.drop,2), label: 'Drop', pct: p => p.pct_drop,
     },
     {
-      title: 'Fastest Decay',
-      desc: 'Most negative decay coefficient from the RAPM model. These players lose impact fastest as their shift ages — ideal candidates for shorter shifts. Min 30 min TOI.',
-      players: [...CHARTED].filter(p=>p.toi_min>=30).sort((a,b)=>a.decay_coef-b.decay_coef).slice(0,10),
-      stat: p => p.decay_coef.toFixed(6), label: 'Coef', pct: p => p.pct_decay,
-    },
-    {
-      title: 'Overuse Flagged',
-      desc: 'Bottom 15th percentile of decay rate among players with ≥ 50 min 5v5 TOI. These players show statistically significant shift-age performance drops, suggesting they are being kept on ice too long.',
-      players: CHARTED.filter(p=>p.flagged).sort((a,b)=>a.decay_coef-b.decay_coef).slice(0,10),
-      stat: p => p.decay_coef.toFixed(6), label: 'Coef', pct: p => 100-p.pct_decay,
-      accent: '#dc2626', headBg: '#fff5f5',
+      title: 'Least Durable',
+      desc: 'Most negative durability scores. These players lose observed impact fastest as their shift ages. Min 30 min TOI.',
+      players: [...CHARTED].filter(p=>p.toi_min>=30).sort((a,b)=>a.drop-b.drop).slice(0,10),
+      stat: p => fmt(p.drop,2), label: 'Drop', pct: p => p.pct_durability,
     },
   ];
 
@@ -627,17 +626,6 @@ const PlayersPage = ({setPage, setSelectedPlayer}) => {
         <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:4}}>Player Stat Leaders</h1>
         <p style={{fontSize:13,color:'#888'}}>5v5 shift-age analysis · Minimum {MIN_QUALIFYING_SHIFTS} shifts longer than {MIN_QUALIFYING_SHIFT_SECONDS}s · Click any player to open their full profile</p>
       </div>
-
-      {!RAPM_READY && (
-        <div style={{marginBottom:24,padding:'12px 16px',background:'#fefce8',border:'1px solid #fde68a',borderRadius:6,fontSize:13,color:'#92400e',display:'flex',alignItems:'center',gap:10}}>
-          <span style={{fontSize:16}}>⏳</span>
-          <div>
-            <strong>Player RAPM data is not yet available for this season.</strong>
-            {' '}Stint ingestion may still be running, or the RAPM model has not been fit yet.
-            Line combination data is available in the Lines tab.
-          </div>
-        </div>
-      )}
 
       {/* Search bar */}
       <div style={{position:'relative',marginBottom:24}}>
@@ -670,22 +658,27 @@ const PlayersPage = ({setPage, setSelectedPlayer}) => {
                 <thead><tr>
                   <th style={{textAlign:'left'}}>Player</th>
                   <th>Team</th><th>Pos</th>
-                  <th title="Isolated on-ice impact at shift start">Base RAPM</th>
+                  <th title="Observed impact across all qualifying shift segments">Overall xGD</th>
                   <th title="xGD/60 in first 30s of shift">Early xGD</th>
                   <th title="xGD/60 after 45s on ice">Late xGD</th>
-                  <th title="Late minus Early — negative means fades">Drop</th>
-                  <th>TOI (min)</th><th>Flag</th>
+                  <th title="Late minus Early; negative means fades">Drop</th>
+                  <th>TOI (min)</th><th>Sample</th><th>Flag</th>
                 </tr></thead>
                 <tbody>{searchResults.map(p=>(
                   <tr key={p.id} onClick={()=>openPlayer(p)} style={{cursor:'pointer'}}>
                     <td style={{fontWeight:600,color:'#1d4ed8',whiteSpace:'nowrap'}}>{p.name}</td>
                     <td>{p.team}</td><td>{p.pos}</td>
-                    <PctCell pct={p.pct_rapm}  value={fmt(p.base_rapm,4)}/>
+                    <PctCell pct={p.pct_overall}  value={fmt(p.overall_xgd,2)}/>
                     <PctCell pct={p.pct_early} value={fmt(p.early,2)}/>
                     <PctCell pct={p.pct_late}  value={fmt(p.late,2)}/>
                     <PctCell pct={p.pct_drop}  value={fmt(p.drop,2)}/>
                     <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{p.toi_min}</td>
-                    <td style={{textAlign:'center'}}>{p.flagged?<span style={{color:'#dc2626',fontWeight:700}}>⚠</span>:<span style={{color:'#ccc'}}>—</span>}</td>
+                    <td style={{textAlign:'center'}}>
+                      {p.eligible_for_graphs
+                        ? <span style={{color:'#166534',fontWeight:600,fontSize:12}}>Qualified</span>
+                        : <span style={{color:'#a16207',fontWeight:600,fontSize:12}}>Low sample</span>}
+                    </td>
+                    <td style={{textAlign:'center'}}>{p.flagged?<span style={{color:'#dc2626',fontWeight:700}}>⚠</span>:<span style={{color:'#ccc'}}>N/A</span>}</td>
                   </tr>
                 ))}</tbody>
               </table>
@@ -696,11 +689,11 @@ const PlayersPage = ({setPage, setSelectedPlayer}) => {
       {/* Stat key */}
       {!searchResults && (
         <div style={{background:'#f8f9ff',border:'1px solid #dde4f5',borderRadius:6,padding:'13px 18px',marginBottom:24,fontSize:12,color:'#374151',lineHeight:1.8,display:'flex',flexWrap:'wrap',gap:'4px 24px'}}>
-          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Base RAPM</span> — isolated on-ice impact (ridge regression) at shift start, in xGD/60</span>
-          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Early xGD/60</span> — avg xG differential per 60 in first 30s on ice</span>
-          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Late xGD/60</span> — avg xG differential per 60 after 45s on ice</span>
-          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Drop</span> — Late minus Early (negative = fades with shift age)</span>
-          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Decay coef</span> — RAPM model slope per second (more negative = faster fade)</span>
+          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Overall xGD/60</span>: observed 5v5 xG differential per 60 across all qualifying shift segments</span>
+          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Early xGD/60</span>: avg xG differential per 60 in first 30s on ice</span>
+          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Late xGD/60</span>: avg xG differential per 60 after 45s on ice</span>
+          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Drop</span>: Late minus Early (negative = fades with shift age)</span>
+          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Durability</span>: Late minus Early xGD/60 (more negative = faster fade)</span>
           <span>Cell color: <span style={{background:'#1d4ed8',color:'#fff',borderRadius:3,padding:'0 5px',fontSize:11}}>blue</span> = elite percentile · <span style={{background:'#dc2626',color:'#fff',borderRadius:3,padding:'0 5px',fontSize:11}}>red</span> = bottom</span>
         </div>
       )}
@@ -710,7 +703,7 @@ const PlayersPage = ({setPage, setSelectedPlayer}) => {
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:18}}>
           {boards.map(board=>(
             <div key={board.title} style={{background:board.headBg||'#fff',border:`1px solid ${board.accent?'#fecaca':'#e8e8e8'}`,borderRadius:6,overflow:'hidden'}}>
-              <div style={{padding:'14px 16px 10px',borderBottom:'1px solid #f0f0f0',background:board.headBg||'#fff'}}>
+              <div style={{padding:'14px 16px 10px',borderBottom:'1px solid #f0f0f0',background:board.headBg||'#fff',minHeight:96,boxSizing:'border-box'}}>
                 <div style={{fontSize:13,fontWeight:700,color:board.accent||'#111',marginBottom:3}}>{board.title}</div>
                 <div style={{fontSize:11,color:'#888',lineHeight:1.5}}>{board.desc}</div>
               </div>
@@ -998,7 +991,7 @@ const PlayerProfile = ({player, setPage}) => {
           <div style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:14}}>Shift Breakdown</div>
           {[
             ['Fresh (0–30s)', fmt(player.early), player.pct_early],
-            ['Mid (30–45s)',  fmt(+(player.obs[3]+player.obs[4]).toFixed(2)/2), null],
+            ['Mid (30–45s)',  fmt(player.mid), null],
             ['Late (45s+)',   fmt(player.late),  player.pct_late],
             ['Durability',    fmt(player.drop),  player.pct_drop],
           ].map(([l,v,pct])=>(
@@ -1023,7 +1016,7 @@ const PlayerProfile = ({player, setPage}) => {
         </div>
       </div>
 
-      {/* Context row: league percentiles + RAPM */}
+      {/* Context row: league percentiles + observed impact */}
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:16}}>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'16px 20px'}}>
           <div style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:12}}>Context vs. League</div>
@@ -1031,19 +1024,19 @@ const PlayerProfile = ({player, setPage}) => {
             <PctBadge pct={player.pct_early} label="Early xGD/60"/>
             <PctBadge pct={player.pct_late}  label="Late xGD/60"/>
             <PctBadge pct={player.pct_drop}  label="Durability"/>
-            <PctBadge pct={player.pct_rapm}  label="Base RAPM"/>
+            <PctBadge pct={player.pct_overall}  label="Overall xGD/60"/>
             <PctBadge pct={player.pct_toi}   label="TOI"/>
           </div>
         </div>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'16px 20px'}}>
-          <div style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:12}}>RAPM Model</div>
+          <div style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:12}}>Observed Impact</div>
           <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12}}>
-            {[['Base RAPM',fmt(player.base_rapm,4)],['Decay coef',player.decay_coef.toFixed(6)],['Break-even',fmtBreak(player.breakeven)]].map(([l,v])=>(
+            {[['Overall xGD/60',fmt(player.overall_xgd,2)],['Durability',fmt(player.drop,2)],['Qualifying shifts',player.qualifying_shifts_10s]].map(([l,v])=>(
               <div key={l}><div style={{fontSize:10,color:'#aaa',marginBottom:2}}>{l}</div>
                 <div style={{fontSize:17,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{v}</div></div>
             ))}
           </div>
-          <div style={{fontSize:10,color:'#bbb',marginTop:8,fontStyle:'italic'}}>Ridge regression — coefficients near zero = needs more data (300+ games).</div>
+          <div style={{fontSize:10,color:'#bbb',marginTop:8,fontStyle:'italic'}}>Empirical 5v5 xGD/60 from qualifying shift segments.</div>
         </div>
       </div>
 
@@ -1095,7 +1088,7 @@ const LinesPage = () => {
 
       {tab==='overuse' && (
         <div style={{background:'#fff5f5',border:'1px solid #fecaca',borderRadius:5,padding:'10px 14px',marginBottom:16,fontSize:13,color:'#991b1b',fontWeight:500}}>
-          {overuse.length} line combinations flagged — early-to-late drop exceeds 1.0 xGD/60
+          {overuse.length} line combinations flagged; early-to-late drop exceeds 1.0 xGD/60
         </div>
       )}
 
@@ -1138,27 +1131,35 @@ const TeamReportPage = ({setPage, setSelectedPlayer}) => {
   const [tip, setTip] = useState(null);
   const roster = CHARTED.filter(p=>p.team===team).sort((a,b)=>b.toi_min-a.toi_min);
   const flags = roster.filter(p=>p.flagged).length;
-  const avgD  = roster.length ? (roster.reduce((s,p)=>s+p.decay_coef,0)/roster.length).toFixed(6) : 'N/A';
-  const breaks = roster.filter(p=>p.breakeven!=null).map(p=>p.breakeven).sort((a,b)=>a-b);
-  const medB  = breaks.length ? fmtBreak(breaks[Math.floor(breaks.length/2)]) : 'N/A';
+  const avgDurabilityValue = roster.length ? roster.reduce((s,p)=>s+p.drop,0)/roster.length : 0;
+  const avgD  = roster.length ? avgDurabilityValue.toFixed(2) : 'N/A';
+  const avgOverall  = roster.length ? (roster.reduce((s,p)=>s+p.overall_xgd,0)/roster.length).toFixed(2) : 'N/A';
+  const qualityThreshold = avgOverallXgd;
+  const durabilityThreshold = avgDurability;
   const openPlayer = p => { setSelectedPlayer(p); setPage('profile'); };
 
   // ── Quality vs. Durability scatter ──────────────────────────────────────────
   const scW=480, scH=280;
   const sm={top:20,right:20,bottom:48,left:56};
   const sW=scW-sm.left-sm.right, sH=scH-sm.top-sm.bottom;
-  const xs=roster.map(p=>p.decay_coef), ys=roster.map(p=>p.base_rapm);
-  const xPad=0.00005, yPad=0.005;
-  const xMin=(xs.length?Math.min(...xs):-.001)-xPad, xMax=(xs.length?Math.max(...xs):.001)+xPad;
-  const yMin=(ys.length?Math.min(...ys):-.1)-yPad,   yMax=(ys.length?Math.max(...ys):.1)+yPad;
+  const xs=roster.map(p=>p.drop), ys=roster.map(p=>p.overall_xgd);
+  const xPad=0.2, yPad=0.2;
+  const xSpread = xs.length
+    ? Math.max(...xs.map(v => Math.abs(v - durabilityThreshold))) + xPad
+    : 1 + xPad;
+  const xMin=durabilityThreshold-xSpread, xMax=durabilityThreshold+xSpread;
+  const ySpread = ys.length
+    ? Math.max(...ys.map(v => Math.abs(v - qualityThreshold))) + yPad
+    : 1 + yPad;
+  const yMin=qualityThreshold-ySpread, yMax=qualityThreshold+ySpread;
   const sxS=v=>((v-xMin)/(xMax-xMin))*sW;
   const syS=v=>sH-((v-yMin)/(yMax-yMin))*sH;
   // quadrant labels
   const quadrants = [
-    {x:sW*0.75,y:10,  label:'Elite and Durable',color:'#15803d'},
-    {x:sW*0.05,y:10,  label:'Elite but Fades',  color:'#b45309'},
-    {x:sW*0.75,y:sH-6,label:'Safe but Low Output', color:'#6b7280'},
-    {x:sW*0.05,y:sH-6,label:'Avoid',             color:'#dc2626'},
+    {x:sW-10,y:16,   label:'Elite and Durable',color:'#15803d',anchor:'end'},
+    {x:10,y:16,      label:'Elite but Fades',  color:'#b45309',anchor:'start'},
+    {x:sW-10,y:sH-10,label:'Safe but Low Output', color:'#6b7280',anchor:'end'},
+    {x:10,y:sH-10,   label:'Avoid',             color:'#dc2626',anchor:'start'},
   ];
 
   const handleScatterMove = (e, p) => {
@@ -1171,22 +1172,22 @@ const TeamReportPage = ({setPage, setSelectedPlayer}) => {
     {
       label: 'Elite and Durable', color: '#15803d', bg: '#f0fdf4',
       advice: 'Long shifts OK. Play in all situations.',
-      players: roster.filter(p => p.base_rapm > 0 && p.decay_coef >= 0),
+      players: roster.filter(p => p.overall_xgd > qualityThreshold && p.drop >= durabilityThreshold),
     },
     {
       label: 'Elite but Fades', color: '#b45309', bg: '#fffbeb',
       advice: 'Keep shifts short. Swap out before 40s.',
-      players: roster.filter(p => p.base_rapm > 0 && p.decay_coef < 0),
+      players: roster.filter(p => p.overall_xgd > qualityThreshold && p.drop < durabilityThreshold),
     },
     {
       label: 'Safe but Low Output', color: '#6b7280', bg: '#f9fafb',
       advice: 'Depth minutes. Shift length flexible.',
-      players: roster.filter(p => p.base_rapm <= 0 && p.decay_coef >= 0),
+      players: roster.filter(p => p.overall_xgd <= qualityThreshold && p.drop >= durabilityThreshold),
     },
     {
       label: 'Avoid', color: '#dc2626', bg: '#fff5f5',
-      advice: 'Minimize deployment. Negative from puck drop.',
-      players: roster.filter(p => p.base_rapm <= 0 && p.decay_coef < 0),
+      advice: 'Minimize deployment. Below league-average impact and fading.',
+      players: roster.filter(p => p.overall_xgd <= qualityThreshold && p.drop < durabilityThreshold),
     },
   ].filter(g => g.players.length > 0);
 
@@ -1209,9 +1210,9 @@ const TeamReportPage = ({setPage, setSelectedPlayer}) => {
       {/* KPI row */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:24}}>
         <KPICard label="Players in sample" value={roster.length} accent="#1d4ed8" sub={`Minimum ${MIN_QUALIFYING_SHIFTS} shifts over ${MIN_QUALIFYING_SHIFT_SECONDS}s`}/>
-        <KPICard label="Overuse-risk skaters" value={flags} sub="Bottom 15% decay among high-TOI players" accent={flags>0?'#dc2626':'#16a34a'}/>
-        <KPICard label="Team avg decay" value={avgD} accent="#8b5cf6"/>
-        <KPICard label="Median break-even" value={medB} accent="#0891b2"/>
+        <KPICard label="Overuse-risk skaters" value={flags} sub="Bottom 15% durability among high-TOI players" accent={flags>0?'#dc2626':'#16a34a'}/>
+        <KPICard label="Team avg durability" value={avgD} accent="#8b5cf6"/>
+        <KPICard label="Team avg xGD/60" value={avgOverall} accent="#0891b2"/>
       </div>
 
       {/* Main two-column section */}
@@ -1219,31 +1220,31 @@ const TeamReportPage = ({setPage, setSelectedPlayer}) => {
 
         {/* Quality vs Durability scatter */}
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px',position:'relative'}}>
-          <SectionHeader title="Quality vs. Durability" sub="Each dot = one player. Hover to identify, click to open profile."/>
+          <SectionHeader title="Quality vs. Durability" sub="Each dot = one player. Horizontal split = league average xGD/60. Vertical split = league average durability. Hover to identify, click to open profile."/>
           <div style={{fontSize:11,color:'#888',marginBottom:10,display:'flex',gap:16}}>
-            <span><b style={{color:'#1d4ed8'}}>X →</b> Decay coef (right = holds up longer)</span>
-            <span><b style={{color:'#1d4ed8'}}>Y ↑</b> Base RAPM (up = better quality)</span>
+            <span><b style={{color:'#1d4ed8'}}>X →</b> Durability (right = above league average)</span>
+            <span><b style={{color:'#1d4ed8'}}>Y ↑</b> Overall xGD/60 (up = above league average)</span>
           </div>
           <div style={{position:'relative',display:'inline-block'}}>
             <svg width={scW} height={scH} style={{cursor:'crosshair'}} onMouseLeave={()=>setTip(null)}>
               <g transform={`translate(${sm.left},${sm.top})`}>
                 {/* quadrant shading */}
-                <rect x={sxS(0)} y={0} width={sW-sxS(0)} height={syS(0)} fill="#f0fdf4" opacity="0.6"/>
-                <rect x={0} y={0} width={sxS(0)} height={syS(0)} fill="#fffbeb" opacity="0.5"/>
-                <rect x={sxS(0)} y={syS(0)} width={sW-sxS(0)} height={sH-syS(0)} fill="#f9fafb" opacity="0.4"/>
-                <rect x={0} y={syS(0)} width={sxS(0)} height={sH-syS(0)} fill="#fff5f5" opacity="0.5"/>
-                {/* zero lines */}
-                <line x1={0} y1={syS(0)} x2={sW} y2={syS(0)} stroke="#ddd" strokeWidth="1"/>
-                <line x1={sxS(0)} y1={0} x2={sxS(0)} y2={sH} stroke="#ddd" strokeWidth="1"/>
+                <rect x={sxS(durabilityThreshold)} y={0} width={sW-sxS(durabilityThreshold)} height={syS(qualityThreshold)} fill="#f0fdf4" opacity="0.6"/>
+                <rect x={0} y={0} width={sxS(durabilityThreshold)} height={syS(qualityThreshold)} fill="#fffbeb" opacity="0.5"/>
+                <rect x={sxS(durabilityThreshold)} y={syS(qualityThreshold)} width={sW-sxS(durabilityThreshold)} height={sH-syS(qualityThreshold)} fill="#f9fafb" opacity="0.4"/>
+                <rect x={0} y={syS(qualityThreshold)} width={sxS(durabilityThreshold)} height={sH-syS(qualityThreshold)} fill="#fff5f5" opacity="0.5"/>
+                {/* split lines */}
+                <line x1={0} y1={syS(qualityThreshold)} x2={sW} y2={syS(qualityThreshold)} stroke="#94a3b8" strokeWidth="1.2" strokeDasharray="6 4"/>
+                <line x1={sxS(durabilityThreshold)} y1={0} x2={sxS(durabilityThreshold)} y2={sH} stroke="#94a3b8" strokeWidth="1.2" strokeDasharray="6 4"/>
                 {/* quadrant labels */}
                 {quadrants.map(q=>(
                   <text key={q.label} x={q.x} y={q.y} fontSize="9" fill={q.color} opacity="0.7"
-                    fontFamily="IBM Plex Sans, sans-serif" fontWeight="600" textAnchor={q.x>sW/2?'end':'start'}>{q.label}</text>
+                    fontFamily="IBM Plex Sans, sans-serif" fontWeight="600" textAnchor={q.anchor}>{q.label}</text>
                 ))}
                 {/* dots */}
                 {roster.map(p=>(
                   <circle key={p.id}
-                    cx={sxS(p.decay_coef)} cy={syS(p.base_rapm)} r={Math.max(4, Math.min(8, p.toi_min/15))}
+                    cx={sxS(p.drop)} cy={syS(p.overall_xgd)} r={5}
                     fill={p.flagged?'#dc2626':'#1d4ed8'} opacity="0.75" stroke="#fff" strokeWidth="1.2"
                     style={{cursor:'pointer'}}
                     onClick={()=>openPlayer(p)}
@@ -1255,11 +1256,19 @@ const TeamReportPage = ({setPage, setSelectedPlayer}) => {
                 {[xMin+(xMax-xMin)*0.25, xMin+(xMax-xMin)*0.5, xMin+(xMax-xMin)*0.75].map((v,i)=>(
                   <text key={i} x={sxS(v)} y={sH+18} textAnchor="middle" fontSize="9" fill="#bbb" fontFamily="IBM Plex Mono">{v.toFixed(4)}</text>
                 ))}
-                <text x={sW/2} y={sH+36} textAnchor="middle" fontSize="11" fill="#888">Decay coefficient</text>
-                <text x={-42} y={sH/2} textAnchor="middle" fontSize="11" fill="#888" transform={`rotate(-90,-42,${sH/2})`}>Base RAPM</text>
-                {[yMin+(yMax-yMin)*0.25,yMin+(yMax-yMin)*0.5,yMin+(yMax-yMin)*0.75].map((v,i)=>(
+                <text x={sW/2} y={sH+36} textAnchor="middle" fontSize="11" fill="#888">Durability</text>
+                <text x={-42} y={sH/2} textAnchor="middle" fontSize="11" fill="#888" transform={`rotate(-90,-42,${sH/2})`}>Overall xGD/60</text>
+                {[yMin+(yMax-yMin)*0.25, qualityThreshold, yMin+(yMax-yMin)*0.75].map((v,i)=>(
                   <text key={i} x={-6} y={syS(v)+4} textAnchor="end" fontSize="9" fill="#bbb" fontFamily="IBM Plex Mono">{v.toFixed(3)}</text>
                 ))}
+                <rect x={6} y={syS(qualityThreshold)-18} width={110} height={16} rx={4} fill="rgba(255,255,255,0.92)"/>
+                <text x={12} y={syS(qualityThreshold)-6} fontSize="9" fill="#94a3b8" fontFamily="IBM Plex Mono">
+                  league avg {qualityThreshold.toFixed(2)}
+                </text>
+                <rect x={sxS(durabilityThreshold)+6} y={6} width={112} height={16} rx={4} fill="rgba(255,255,255,0.92)"/>
+                <text x={sxS(durabilityThreshold)+12} y={18} fontSize="9" fill="#94a3b8" fontFamily="IBM Plex Mono">
+                  league dur {durabilityThreshold.toFixed(2)}
+                </text>
               </g>
             </svg>
             {tip && (
@@ -1267,12 +1276,12 @@ const TeamReportPage = ({setPage, setSelectedPlayer}) => {
                 borderRadius:6,padding:'8px 11px',fontSize:12,pointerEvents:'none',whiteSpace:'nowrap',
                 boxShadow:'0 4px 16px rgba(0,0,0,0.25)',zIndex:999}}>
                 <div style={{fontWeight:600,marginBottom:2}}>{tip.p.name} <span style={{opacity:0.5,fontWeight:400}}>({tip.p.pos})</span></div>
-                <div style={{fontFamily:'IBM Plex Mono',fontSize:11,color:'#a5b4fc'}}>RAPM <span style={{color:'#fff'}}>{tip.p.base_rapm.toFixed(4)}</span>  Decay <span style={{color:'#fff'}}>{tip.p.decay_coef.toFixed(6)}</span></div>
+                <div style={{fontFamily:'IBM Plex Mono',fontSize:11,color:'#a5b4fc'}}>xGD <span style={{color:'#fff'}}>{tip.p.overall_xgd.toFixed(2)}</span>  Durability <span style={{color:'#fff'}}>{tip.p.drop.toFixed(2)}</span></div>
                 <div style={{fontSize:10,color:'#94a3b8',marginTop:2}}>TOI {tip.p.toi_min} min · Click to open profile</div>
               </div>
             )}
           </div>
-          <div style={{fontSize:10,color:'#bbb',marginTop:6}}>Dot size ∝ 5v5 TOI. <span style={{color:'#dc2626'}}>Red</span> = overuse-flagged.</div>
+          <div style={{fontSize:10,color:'#bbb',marginTop:6}}><span style={{color:'#dc2626'}}>Red</span> = overuse-flagged.</div>
         </div>
 
         {/* Deployment guide */}
@@ -1286,7 +1295,7 @@ const TeamReportPage = ({setPage, setSelectedPlayer}) => {
                   <span style={{fontSize:11,color:'#888'}}>{g.advice}</span>
                 </div>
                 <div style={{display:'flex',flexWrap:'wrap',gap:'4px 10px'}}>
-                  {g.players.sort((a,b)=>b.base_rapm-a.base_rapm).map(p=>(
+                  {g.players.sort((a,b)=>b.overall_xgd-a.overall_xgd).map(p=>(
                     <button key={p.id} onClick={()=>openPlayer(p)}
                       style={{fontSize:12,fontWeight:600,color:'#1d4ed8',background:'none',border:'none',padding:0,cursor:'pointer'}}>
                       {p.name}
@@ -1304,19 +1313,19 @@ const TeamReportPage = ({setPage, setSelectedPlayer}) => {
         <SectionHeader title="Roster Breakdown" sub="Click a player name to open their full profile."/>
         <table>
           <thead><tr>
-            <th style={{textAlign:'left'}}>Player</th><th>Pos</th><th>Base RAPM</th><th>Decay</th><th>Early xGD</th><th>Late xGD</th><th>TOI (min)</th><th>Break-even</th><th>Flagged</th>
+            <th style={{textAlign:'left'}}>Player</th><th>Pos</th><th>Overall xGD</th><th>Durability</th><th>Early xGD</th><th>Late xGD</th><th>TOI (min)</th><th>Shifts</th><th>Flagged</th>
           </tr></thead>
           <tbody>{roster.map(p=>(
             <tr key={p.id}>
               <td><button onClick={()=>openPlayer(p)} style={{color:'#1d4ed8',fontWeight:600,fontSize:13}}>{p.name}</button></td>
               <td style={{textAlign:'center',color:'#888',fontSize:12}}>{p.pos}</td>
-              <PctCell pct={p.pct_rapm}  value={fmt(p.base_rapm,4)}/>
-              <PctCell pct={p.pct_decay} value={p.decay_coef.toFixed(6)}/>
+              <PctCell pct={p.pct_overall}  value={fmt(p.overall_xgd,2)}/>
+              <PctCell pct={p.pct_durability} value={fmt(p.drop,2)}/>
               <PctCell pct={p.pct_early} value={fmt(p.early)}/>
               <PctCell pct={p.pct_late}  value={fmt(p.late)}/>
               <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{p.toi_min}</td>
-              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{fmtBreak(p.breakeven)}</td>
-              <td style={{textAlign:'center'}}>{p.flagged?<Tag bg="#fee2e2" color="#dc2626">⚠ Yes</Tag>:<span style={{color:'#aaa',fontSize:12}}>—</span>}</td>
+              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{p.stints}</td>
+              <td style={{textAlign:'center'}}>{p.flagged?<Tag bg="#fee2e2" color="#dc2626">⚠ Yes</Tag>:<span style={{color:'#aaa',fontSize:12}}>N/A</span>}</td>
             </tr>
           ))}</tbody>
         </table>
