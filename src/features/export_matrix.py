@@ -1,10 +1,5 @@
 ## Reads the processed stint parquet, builds the RAPM design matrix,
 ## and saves it so the R model can pick it up.
-##
-## This is the handoff point between the Python and R sides of the pipeline.
-##
-## Usage:
-##   python -m src.features.export_matrix --season 20232024
 
 from __future__ import annotations
 

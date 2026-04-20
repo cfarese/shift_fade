@@ -51,15 +51,55 @@ def _get_player_index(season: str) -> pd.DataFrame:
     return result
 
 
+def get_player_rolling_decay(
+    season: str,
+    player_id: int,
+    window: int = 20,
+    step: int = 5,
+    min_toi_sec: int = 60,
+    min_stint_sec: int = 20,
+) -> pd.DataFrame:
+    """Rolling-window xGD/60 across the full shift-age range for one player.
+    Evaluates a `window`-second sliding window every `step` seconds."""
+    index  = _get_player_index(season)
+    on_ice = index[index["player_id"] == player_id].copy()
+    if on_ice.empty:
+        return pd.DataFrame()
+    if min_stint_sec > 0:
+        on_ice = on_ice[on_ice["duration"] >= min_stint_sec]
+    if on_ice.empty:
+        return pd.DataFrame()
+
+    max_age = int(on_ice["shift_age"].max())
+    half    = window // 2
+    rows    = []
+    for x in range(0, max_age + step, step):
+        seg = on_ice[(on_ice["shift_age"] >= x - half) & (on_ice["shift_age"] < x + half)]
+        toi = float(seg["duration"].sum())
+        if toi < min_toi_sec:
+            continue
+        xgd60 = (float(seg["p_xg_for"].sum()) - float(seg["p_xg_against"].sum())) / toi * 3600
+        rows.append({"age": x, "xgd60": round(xgd60, 3), "toi_sec": round(toi, 1), "n": len(seg)})
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 def get_player_empirical_decay(
     season: str,
     player_id: int,
     bucket_size: int = 10,
     min_toi_sec: int = 60,
+    min_stints: int = 3,
+    min_stint_sec: int = 0,
 ) -> pd.DataFrame:
     index  = _get_player_index(season)
     on_ice = index[index["player_id"] == player_id].copy()
 
+    if on_ice.empty:
+        return pd.DataFrame()
+
+    if min_stint_sec > 0:
+        on_ice = on_ice[on_ice["duration"] >= min_stint_sec]
     if on_ice.empty:
         return pd.DataFrame()
 
@@ -77,7 +117,8 @@ def get_player_empirical_decay(
         .reset_index()
     )
 
-    bucketed = bucketed[bucketed["toi_sec"] >= min_toi_sec]
+    bucketed = bucketed[(bucketed["toi_sec"] >= min_toi_sec) & (bucketed["n_stints"] >= min_stints)]
+
     if bucketed.empty:
         return pd.DataFrame()
 

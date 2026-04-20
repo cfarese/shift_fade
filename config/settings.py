@@ -36,7 +36,7 @@ class AppConfig:
     nhl_api: NHLApiConfig = field(default_factory=NHLApiConfig)
 
     ## seasons to pull, format YYYYYYYY
-    seasons: list[str] = field(default_factory=lambda: ["20222023", "20232024"])
+    seasons: list[str] = field(default_factory=lambda: ["20222023", "20232024", "20252026"])
 
     ## ridge regularization strength, tuned empirically
     ridge_alpha: float = 25.0

@@ -38,12 +38,15 @@ const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
 // ── REAL DATA ────────────────────────────────────────────────────────────────
 const AGES = [0,10,20,30,40,50,60,70,80];
 const PLAYERS    = window.__DATA__.players;
+// players with enough shift-age data to produce a meaningful decay chart
+const CHARTED    = PLAYERS.filter(p => (p.n_decay_buckets || 0) >= 4);
 const LINES      = window.__DATA__.lines;
 const LEAGUE_P25 = window.__DATA__.league_p25;
 const LEAGUE_P75 = window.__DATA__.league_p75;
 const LEAGUE_MED = window.__DATA__.league_med;
 const TEAMS      = [...new Set(PLAYERS.map(p=>p.team))].sort();
 const SEASONS    = window.__DATA__.seasons;
+const RAPM_READY = window.__DATA__.rapm_ready !== false;
 
 // ── UTILS ────────────────────────────────────────────────────────────────────
 function rankField(arr, field, hi=true) {
@@ -82,9 +85,9 @@ function pctFg(pct) { return (pct<18||pct>82)?'#fff':'#222'; }
 const fmt = (v,d=2) => v==null?'—':(v>0?'+':'')+Number(v).toFixed(d);
 const fmtNoSign = (v,d=2) => v==null?'—':Number(v).toFixed(d);
 const fmtBreak = (v) => v==null?'Never':v>200?'>200s':v+'s';
-const overuseCount = PLAYERS.filter(p=>p.flagged).length;
-const avgDecay = (PLAYERS.reduce((s,p)=>s+p.decay_coef,0)/PLAYERS.length);
-const medBreak = PLAYERS.filter(p=>p.breakeven!=null).map(p=>p.breakeven).sort((a,b)=>a-b);
+const overuseCount = CHARTED.filter(p=>p.flagged).length;
+const avgDecay = CHARTED.length ? (CHARTED.reduce((s,p)=>s+p.decay_coef,0)/CHARTED.length) : 0;
+const medBreak = CHARTED.filter(p=>p.breakeven!=null).map(p=>p.breakeven).sort((a,b)=>a-b);
 
 // ── SHARED COMPONENTS ────────────────────────────────────────────────────────
 const KPICard = ({label, value, sub, accent}) => (
@@ -95,17 +98,39 @@ const KPICard = ({label, value, sub, accent}) => (
   </div>
 );
 
-const PctCell = ({pct, value, bold}) => (
-  <td style={{background:pctBg(pct), color:pctFg(pct), fontFamily:'IBM Plex Mono', fontSize:12, fontWeight:bold?600:400}}>
-    {value}
-  </td>
-);
+const PctCell = ({pct, value, bold}) => {
+  const p = Math.max(1, pct);
+  return <td style={{background:pctBg(p), color:pctFg(p), fontFamily:'IBM Plex Mono', fontSize:12, fontWeight:bold?600:400}}>{value}</td>;
+};
 
-const PctBadge = ({pct, label}) => (
-  <div style={{textAlign:'center'}}>
-    <div style={{display:'inline-block', background:pctBg(pct), color:pctFg(pct), borderRadius:4, padding:'4px 10px', fontFamily:'IBM Plex Mono', fontSize:13, fontWeight:600, minWidth:52}}>{pct}<span style={{fontSize:10,fontWeight:400}}>th</span></div>
-    <div style={{fontSize:11,color:'#888',marginTop:4,fontWeight:500}}>{label}</div>
-  </div>
+const PctBadge = ({pct, label}) => {
+  const p = Math.max(1, pct);
+  return (
+    <div style={{textAlign:'center'}}>
+      <div style={{display:'inline-block', background:pctBg(p), color:pctFg(p), borderRadius:4, padding:'4px 10px', fontFamily:'IBM Plex Mono', fontSize:13, fontWeight:600, minWidth:52}}>{p}<span style={{fontSize:10,fontWeight:400}}>th</span></div>
+      <div style={{fontSize:11,color:'#888',marginTop:4,fontWeight:500}}>{label}</div>
+    </div>
+  );
+};
+
+const teamLogoUrl = (code) => `https://assets.nhle.com/logos/nhl/svg/${code}_light.svg`;
+const SEASON = window.__DATA__.current_season;
+const headshotUrl = (id, team) => `https://assets.nhle.com/mugs/nhl/${SEASON}/${team}/${id}.png`;
+
+const PlayerHeadshot = ({id, name, team, size=80}) => {
+  const [failed, setFailed] = React.useState(false);
+  if (failed) {
+    return <div style={{width:size,height:size,borderRadius:'50%',background:'#e8e8e8',border:'2px solid #ddd',
+      display:'flex',alignItems:'center',justifyContent:'center',color:'#bbb',fontSize:size*0.4,flexShrink:0}}>?</div>;
+  }
+  return <img src={headshotUrl(id, team)} alt={name} width={size} height={size}
+    onError={()=>setFailed(true)}
+    style={{borderRadius:'50%',objectFit:'cover',background:'#f0f0f0',border:'2px solid #e8e8e8',flexShrink:0,display:'block'}}/>;
+};
+
+const TeamLogo = ({code, size=28}) => (
+  <img src={teamLogoUrl(code)} alt={code} width={size} height={size}
+    style={{objectFit:'contain',flexShrink:0}} onError={e=>e.currentTarget.style.display='none'}/>
 );
 
 const Tag = ({children, color='#666', bg='#f0f0f0'}) => (
@@ -164,56 +189,139 @@ const TopNav = ({page,setPage,season,onSeasonChange,breadcrumb}) => (
 );
 
 // ── DECAY CURVE CHART ─────────────────────────────────────────────────────────
-const DecayCurveChart = ({player, width=600, height=240}) => {
-  const m = {top:18,right:24,bottom:44,left:52};
-  const W = width-m.left-m.right, H = height-m.top-m.bottom;
-  const allV = [...LEAGUE_P25,...LEAGUE_P75,...(player?player.obs:[])];
-  const yMin = Math.floor(Math.min(...allV)-0.5), yMax = Math.ceil(Math.max(...allV)+0.5);
-  const xS = t => (t/80)*W;
-  const yS = v => H - ((v-yMin)/(yMax-yMin))*H;
-  const pathOf = pts => pts.map((v,i)=>`${i?'L':'M'} ${xS(AGES[i])} ${yS(v)}`).join(' ');
-  const bandPath = [
-    ...LEAGUE_P75.map((v,i)=>`${i?'L':'M'} ${xS(AGES[i])} ${yS(v)}`),
-    ...LEAGUE_P25.slice().reverse().map((v,i)=>`L ${xS(AGES[AGES.length-1-i])} ${yS(v)}`),
-    'Z'
-  ].join(' ');
+// Smoothed empirical trend + league P25/P75 band as context baseline.
+// Y-axis auto-scales to fit the player curve; league band anchors the eye.
+function catmullRomPath(pts) {
+  if (pts.length === 0) return '';
+  if (pts.length === 1) return `M ${pts[0][0]} ${pts[0][1]}`;
+  let d = `M ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 1; i < pts.length; i++) {
+    const p0 = pts[Math.max(0, i-2)];
+    const p1 = pts[i-1];
+    const p2 = pts[i];
+    const p3 = pts[Math.min(pts.length-1, i+1)];
+    const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += ` C ${cp1x},${cp1y} ${cp2x},${cp2y} ${p2[0]},${p2[1]}`;
+  }
+  return d;
+}
+
+const DecayCurveChart = ({buckets, values, rapmObs, rapmAges, leagueP25, leagueP75, leagueMed, width=600, height=240}) => {
+  const m = {top:18, right:20, bottom:44, left:48};
+  const W = width - m.left - m.right;
+  const H = height - m.top - m.bottom;
+
+  const xMax = (buckets && buckets.length > 0) ? Math.max(Math.max(...buckets), 80) : 80;
+  const xTicks = [];
+  for (let t = 0; t <= xMax; t += 10) xTicks.push(t);
+
+  // Y range: fit player data + league band, always show at least ±2 around median
+  const allV = [
+    ...(values || []),
+    ...(leagueP25 || []),
+    ...(leagueP75 || []),
+  ].filter(v => v != null && isFinite(v));
+  const rawMin = Math.min(...allV);
+  const rawMax = Math.max(...allV);
+  const span   = Math.max(rawMax - rawMin, 3);
+  const pad    = span * 0.18;
+  const yMin   = Math.floor(rawMin - pad);
+  const yMax   = Math.ceil(rawMax  + pad);
+  const range  = yMax - yMin;
+  const step   = range <= 4 ? 1 : range <= 8 ? 2 : range <= 16 ? 4 : 5;
   const yTicks = [];
-  for(let v=Math.ceil(yMin); v<=yMax; v+=2) yTicks.push(v);
-  const avgShift = 45;
+  for (let v = Math.ceil(yMin/step)*step; v <= yMax; v += step) yTicks.push(v);
+
+  const xS    = t => (t / xMax) * W;
+  const yS    = v => H - ((v - yMin) / (yMax - yMin)) * H;
+  const clamp = v => Math.max(yMin, Math.min(yMax, v));
+  const uid   = Math.random().toString(36).slice(2,8);
+  const clipId = `cc-${uid}`;
+
+  const pts       = (buckets || []).map((t, i) => [xS(t), yS(clamp(values[i]))]);
+  const curvePath = catmullRomPath(pts);
+
+  // league band path: P25 forward then P75 backward (league data only covers 0-80)
+  const bandPath = (leagueP25 && leagueP75 && leagueP25.length > 1)
+    ? AGES.map((t,i) => `${i?'L':'M'} ${xS(t)} ${yS(clamp(leagueP25[i]))}`).join(' ')
+      + ' ' + [...AGES].reverse().map((t,i) => `L ${xS(t)} ${yS(clamp(leagueP75[AGES.length-1-i]))}`).join(' ')
+      + ' Z'
+    : '';
+
+  const medPath = (leagueMed && leagueMed.length > 1)
+    ? AGES.map((t,i) => `${i?'L':'M'} ${xS(t)} ${yS(clamp(leagueMed[i]))}`).join(' ')
+    : '';
+
   return (
-    <svg width={width} height={height} style={{display:'block',overflow:'visible'}}>
-      <g transform={`translate(${m.left},${m.top})`}>
-        <path d={bandPath} fill="#e2eaf6" opacity="0.7"/>
-        <path d={pathOf(LEAGUE_MED)} stroke="#aab" strokeWidth="1.5" strokeDasharray="5 3" fill="none"/>
-        <line x1={xS(avgShift)} y1={0} x2={xS(avgShift)} y2={H} stroke="#bbb" strokeDasharray="3 2" strokeWidth="1"/>
-        <text x={xS(avgShift)+4} y={12} fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">avg shift</text>
-        <line x1={0} y1={yS(0)} x2={W} y2={yS(0)} stroke="#ddd" strokeWidth="1"/>
-        {yTicks.map(v=>(
-          <g key={v}>
-            <line x1={0} y1={yS(v)} x2={W} y2={yS(v)} stroke="#f0f0f0" strokeWidth="1"/>
-            <text x={-8} y={yS(v)+4} textAnchor="end" fontSize="11" fill="#999" fontFamily="IBM Plex Mono">{v}</text>
-          </g>
-        ))}
-        {AGES.map((t,i)=>(
-          <text key={i} x={xS(t)} y={H+20} textAnchor="middle" fontSize="11" fill="#999" fontFamily="IBM Plex Mono">{t}</text>
-        ))}
-        <text x={W/2} y={H+38} textAnchor="middle" fontSize="12" fill="#777">Shift age (seconds)</text>
-        <text x={-36} y={H/2} textAnchor="middle" fontSize="12" fill="#777" transform={`rotate(-90,-36,${H/2})`}>xGD/60</text>
-        {player && <>
-          <path d={pathOf(player.obs)} stroke="#1d4ed8" strokeWidth="2.5" fill="none" strokeLinejoin="round"/>
-          {AGES.map((t,i)=>(
-            <circle key={i} cx={xS(t)} cy={yS(player.obs[i])} r="4" fill="#1d4ed8" stroke="#fff" strokeWidth="1.5"/>
+    <div>
+      <svg width={width} height={height} style={{display:'block', overflow:'hidden'}}>
+        <defs>
+          <clipPath id={clipId}><rect x={0} y={0} width={W} height={H}/></clipPath>
+        </defs>
+        <g transform={`translate(${m.left},${m.top})`}>
+          {yTicks.map(v => (
+            <g key={v}>
+              <line x1={0} y1={yS(v)} x2={W} y2={yS(v)} stroke="#f0f0f0" strokeWidth={1}/>
+              <text x={-8} y={yS(v)+4} textAnchor="end" fontSize="11" fill="#bbb" fontFamily="IBM Plex Mono">{v>0?`+${v}`:v}</text>
+            </g>
           ))}
-        </>}
-        {/* Legend */}
-        <g transform={`translate(${W-160},${H+26})`}>
-          <rect x="0" y="-6" width="12" height="12" fill="#e2eaf6" rx="2"/>
-          <text x="16" y="4" fontSize="10" fill="#888">P25–P75 league</text>
-          <line x1="90" y1="0" x2="102" y2="0" stroke="#aab" strokeWidth="1.5" strokeDasharray="4 2"/>
-          <text x="106" y="4" fontSize="10" fill="#888">median</text>
+          <text x={-34} y={H/2} textAnchor="middle" fontSize="12" fill="#aaa"
+            transform={`rotate(-90,-34,${H/2})`}>xGD/60</text>
+
+          <g clipPath={`url(#${clipId})`}>
+            {/* league P25–P75 band */}
+            {bandPath && <path d={bandPath} fill="rgba(0,0,0,0.06)"/>}
+            {/* league median */}
+            {medPath  && <path d={medPath}  stroke="#bbb" strokeWidth="1" strokeDasharray="4 3" fill="none"/>}
+
+            {/* avg-shift reference */}
+            <line x1={xS(45)} y1={0} x2={xS(45)} y2={H} stroke="#ebebeb" strokeDasharray="3 3" strokeWidth="1"/>
+            <text x={xS(45)+4} y={12} fontSize="9" fill="#ccc" fontFamily="IBM Plex Mono">avg shift</text>
+
+            {/* RAPM model */}
+            {rapmObs && rapmAges && rapmObs.length > 0 && (
+              <path d={rapmObs.map((v,i) => `${i?'L':'M'} ${xS(rapmAges[i])} ${yS(clamp(v))}`).join(' ')}
+                stroke="#8b5cf6" strokeWidth="1.5" strokeDasharray="5 3" fill="none" opacity="0.6"/>
+            )}
+
+            {/* smooth player trend line */}
+            {curvePath && (
+              <path d={curvePath} stroke="#1d4ed8" strokeWidth="2.5" fill="none" strokeLinejoin="round"/>
+            )}
+
+            {/* empirical dots */}
+            {buckets && values && buckets.map((t,i) => {
+              const v = values[i];
+              if (v == null || !isFinite(v)) return null;
+              return <circle key={i} cx={xS(t)} cy={yS(clamp(v))} r="4.5" fill="#1d4ed8" stroke="#fff" strokeWidth="1.5"/>;
+            })}
+          </g>
+
+          {xTicks.map(t => (
+            <text key={t} x={xS(t)} y={H+16} textAnchor="middle" fontSize="11" fill="#bbb" fontFamily="IBM Plex Mono">{t}</text>
+          ))}
+          <text x={W/2} y={H+32} textAnchor="middle" fontSize="12" fill="#aaa">Shift age (seconds)</text>
         </g>
-      </g>
-    </svg>
+      </svg>
+      <div style={{display:'flex',gap:16,alignItems:'center',paddingLeft:m.left,marginTop:4,fontSize:10,color:'#aaa'}}>
+        <span style={{display:'flex',alignItems:'center',gap:5}}>
+          <svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#1d4ed8" strokeWidth="2.5"/></svg>
+          player xGD/60
+        </span>
+        <span style={{display:'flex',alignItems:'center',gap:5}}>
+          <svg width="20" height="10"><rect x="0" y="2" width="20" height="6" fill="rgba(0,0,0,0.08)" rx="1"/>
+            <line x1="0" y1="5" x2="20" y2="5" stroke="#bbb" strokeWidth="1" strokeDasharray="3 2"/></svg>
+          league P25–P75
+        </span>
+        <span style={{display:'flex',alignItems:'center',gap:5}}>
+          <svg width="20" height="6"><line x1="0" y1="3" x2="20" y2="3" stroke="#8b5cf6" strokeWidth="1.5" strokeDasharray="4 2"/></svg>
+          RAPM model
+        </span>
+      </div>
+    </div>
   );
 };
 
@@ -293,17 +401,23 @@ const ScatterPlot = ({players, onSelect, reg, width=360, height=190}) => {
           ))}
           <text x={W/2} y={H+44} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif">Decay coefficient (per second of shift age)</text>
           <text x={-40} y={H/2} textAnchor="middle" fontSize="11" fill="#666" fontFamily="IBM Plex Sans, sans-serif" transform={`rotate(-90,-40,${H/2})`}>Base RAPM (xGD/60 at shift start)</text>
-          <text x={W} y={13} textAnchor="end" fontSize="10" fill="#8b5cf6" fontFamily="IBM Plex Mono" fontWeight="600">R²={reg.r2.toFixed(3)}</text>
-          <g transform={`translate(4,4)`}>
-            <circle cx="5" cy="5" r="4" fill="#dc2626" opacity="0.8"/>
-            <text x="13" y="9" fontSize="10" fill="#666">Flagged</text>
-            <circle cx="5" cy="20" r="4" fill="#1d4ed8" opacity="0.7"/>
-            <text x="13" y="24" fontSize="10" fill="#666">Normal</text>
-            <line x1="0" y1="35" x2="10" y2="35" stroke="#8b5cf6" strokeWidth="1.8" strokeDasharray="4 2"/>
-            <text x="13" y="39" fontSize="10" fill="#8b5cf6">OLS trend</text>
-          </g>
         </g>
       </svg>
+      {/* Legend row outside SVG so it never overlaps data */}
+      <div style={{display:'flex',alignItems:'center',gap:16,marginTop:6,paddingLeft:m.left,fontSize:11,color:'#666',fontFamily:'IBM Plex Sans, sans-serif'}}>
+        <span style={{display:'flex',alignItems:'center',gap:5}}>
+          <svg width="10" height="10"><circle cx="5" cy="5" r="4" fill="#dc2626" opacity="0.8"/></svg> Flagged
+        </span>
+        <span style={{display:'flex',alignItems:'center',gap:5}}>
+          <svg width="10" height="10"><circle cx="5" cy="5" r="4" fill="#1d4ed8" opacity="0.7"/></svg> Normal
+        </span>
+        <span style={{display:'flex',alignItems:'center',gap:5}}>
+          <svg width="16" height="10"><line x1="0" y1="5" x2="16" y2="5" stroke="#8b5cf6" strokeWidth="1.8" strokeDasharray="4 2"/></svg> OLS trend
+        </span>
+        <span style={{marginLeft:'auto',fontFamily:'IBM Plex Mono',fontWeight:600,color:'#8b5cf6',paddingRight:m.right}}>
+          r={reg.r>=0?'+':''}{reg.r.toFixed(3)} · R²={reg.r2.toFixed(3)}
+        </span>
+      </div>
       {tip && (
         <div style={{
           position:'absolute',
@@ -335,21 +449,31 @@ const ScatterPlot = ({players, onSelect, reg, width=360, height=190}) => {
 
 // ── OVERVIEW PAGE ─────────────────────────────────────────────────────────────
 const OverviewPage = ({setPage, setSelectedPlayer}) => {
-  const sorted_decay = [...PLAYERS].sort((a,b)=>a.decay_coef-b.decay_coef).slice(0,12);
-  const sorted_rapm  = [...PLAYERS].sort((a,b)=>b.base_rapm-a.base_rapm).slice(0,10);
+  const sorted_decay = [...CHARTED].sort((a,b)=>a.decay_coef-b.decay_coef).slice(0,12);
+  const sorted_rapm  = [...CHARTED].sort((a,b)=>b.base_rapm-a.base_rapm).slice(0,10);
   const medBE = medBreak.length?medBreak[Math.floor(medBreak.length/2)]:null;
 
   const openPlayer = (p) => { setSelectedPlayer(p); setPage('profile'); };
 
   return (
     <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 24px'}}>
+      {!RAPM_READY && (
+        <div style={{marginBottom:24,padding:'12px 16px',background:'#fefce8',border:'1px solid #fde68a',borderRadius:6,fontSize:13,color:'#92400e',display:'flex',alignItems:'center',gap:10}}>
+          <span style={{fontSize:16}}>⏳</span>
+          <div>
+            <strong>RAPM model not yet computed for this season.</strong>
+            {' '}Stint data is ready. Run <code style={{background:'#fef3c7',padding:'1px 5px',borderRadius:3,fontSize:12}}>python3.11 -m src.features.export_matrix --season {window.__DATA__.current_season}</code>
+            {' '}then <code style={{background:'#fef3c7',padding:'1px 5px',borderRadius:3,fontSize:12}}>Rscript r/rapm/rapm_model.R --season {window.__DATA__.current_season}</code> to unlock player stats.
+          </div>
+        </div>
+      )}
       <div style={{marginBottom:28}}>
         <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:4}}>League Overview</h1>
         <p style={{fontSize:13,color:'#888'}}>Shift-age decay analysis across all skaters · 5v5</p>
       </div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:36}}>
-        <KPICard label="Players in sample" value={PLAYERS.length} accent="#1d4ed8"/>
-        <KPICard label="Overuse flags" value={overuseCount} accent={overuseCount>0?'#dc2626':'#16a34a'} sub={`decay < −0.00035, min 50 min TOI`}/>
+        <KPICard label="Players in sample" value={CHARTED.length} accent="#1d4ed8" sub={`${PLAYERS.length - CHARTED.length} excluded — insufficient shift data`}/>
+        <KPICard label="Overuse flags" value={overuseCount} accent={overuseCount>0?'#dc2626':'#16a34a'} sub="bottom 15th pct decay, min 50 min TOI"/>
         <KPICard label="Avg decay coef" value={avgDecay.toFixed(6)} accent="#8b5cf6" sub="negative = worsens with shift age"/>
         <KPICard label="Median break-even" value={fmtBreak(medBE)} accent="#0891b2"/>
       </div>
@@ -364,7 +488,7 @@ const OverviewPage = ({setPage, setSelectedPlayer}) => {
               <span style={{fontWeight:600,color:'#555'}}>Color:</span> Red = high decay (negative), blue = low decay (positive).
             </div>
           </div>
-          <Histogram players={PLAYERS} width={1100} height={220}/>
+          <Histogram players={CHARTED} width={1100} height={220}/>
         </div>
 
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px 24px 16px'}}>
@@ -376,11 +500,11 @@ const OverviewPage = ({setPage, setSelectedPlayer}) => {
             <span style={{color:'#dc2626',fontWeight:600,marginLeft:12}}>Red dots</span> = overuse-flagged.
           </div>
           {(() => {
-            const xs = PLAYERS.map(p=>p.decay_coef);
-            const ys = PLAYERS.map(p=>p.base_rapm);
+            const xs = CHARTED.map(p=>p.decay_coef);
+            const ys = CHARTED.map(p=>p.base_rapm);
             const reg = ols(xs, ys);
             return <>
-              <ScatterPlot players={PLAYERS} onSelect={openPlayer} reg={reg} width={1100} height={260}/>
+              <ScatterPlot players={CHARTED} onSelect={openPlayer} reg={reg} width={1100} height={260}/>
               <div style={{marginTop:10,padding:'8px 12px',background:'#faf9ff',border:'1px solid #e9d5ff',borderRadius:4,fontSize:11,color:'#6b21a8',display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
                 <span style={{fontFamily:'IBM Plex Mono',fontWeight:600}}>r = {reg.r>=0?'+':''}{reg.r.toFixed(3)}</span>
                 <span style={{color:'#c4b5fd'}}>·</span>
@@ -436,180 +560,475 @@ const OverviewPage = ({setPage, setSelectedPlayer}) => {
 };
 
 // ── PLAYERS PAGE ──────────────────────────────────────────────────────────────
-const PlayersPage = ({setPage, setSelectedPlayer, selectedPlayer}) => {
-  const [pid, setPid] = useState(selectedPlayer?.id ?? PLAYERS[0]?.id ?? 0);
-  const [teamFilter, setTeamFilter] = useState('All');
-  const [tab, setTab] = useState('observed');
-  const player = PLAYERS.find(p=>p.id===pid)||PLAYERS[0];
-  const filtered = teamFilter==='All'?PLAYERS:PLAYERS.filter(p=>p.team===teamFilter);
-  const bigDrops = [...PLAYERS].sort((a,b)=>a.drop-b.drop).slice(0,15);
+const PlayersPage = ({setPage, setSelectedPlayer}) => {
+  const [search, setSearch] = useState('');
+  const query = search.trim().toLowerCase();
+  const openPlayer = (p) => { setSelectedPlayer(p); setPage('profile'); };
 
-  // RAPM model curve
-  const rapmObs = AGES.map(t => +(player.base_rapm*42 + player.decay_coef*t*42).toFixed(2));
-  const rapmPlayer = {...player, obs: rapmObs};
+  const searchResults = query
+    ? [...CHARTED]
+        .filter(p => p.name.toLowerCase().includes(query) || p.team.toLowerCase().includes(query))
+        .sort((a,b) => b.base_rapm - a.base_rapm)
+    : null;
+
+  const boards = [
+    {
+      title: 'Top Base RAPM',
+      desc: 'Best overall on-ice impact isolated via ridge regression. Represents xGD/60 at the start of a fresh shift, independent of linemates.',
+      players: [...CHARTED].sort((a,b)=>b.base_rapm-a.base_rapm).slice(0,10),
+      stat: p => fmt(p.base_rapm,4), label: 'RAPM', pct: p => p.pct_rapm,
+    },
+    {
+      title: 'Best Early Impact',
+      desc: 'Highest xGD/60 in the first 30 seconds on ice. Who dominates immediately off a fresh change.',
+      players: [...CHARTED].sort((a,b)=>b.early-a.early).slice(0,10),
+      stat: p => fmt(p.early,2), label: 'Early', pct: p => p.pct_early,
+    },
+    {
+      title: 'Best Late Impact',
+      desc: 'Highest xGD/60 after 45+ seconds on ice. Who holds up as their shift stales — a rare and valuable trait.',
+      players: [...CHARTED].sort((a,b)=>b.late-a.late).slice(0,10),
+      stat: p => fmt(p.late,2), label: 'Late', pct: p => p.pct_late,
+    },
+    {
+      title: 'Most Durable',
+      desc: 'Smallest early→late drop (late xGD − early xGD). Values near 0 or positive mean the player sustains impact across a long shift. Min 30 min TOI.',
+      players: [...CHARTED].filter(p=>p.toi_min>=30).sort((a,b)=>b.drop-a.drop).slice(0,10),
+      stat: p => fmt(p.drop,2), label: 'Drop', pct: p => p.pct_drop,
+    },
+    {
+      title: 'Fastest Decay',
+      desc: 'Most negative decay coefficient from the RAPM model. These players lose impact fastest as their shift ages — ideal candidates for shorter shifts. Min 30 min TOI.',
+      players: [...CHARTED].filter(p=>p.toi_min>=30).sort((a,b)=>a.decay_coef-b.decay_coef).slice(0,10),
+      stat: p => p.decay_coef.toFixed(6), label: 'Coef', pct: p => p.pct_decay,
+    },
+    {
+      title: 'Overuse Flagged',
+      desc: 'Bottom 15th percentile of decay rate among players with ≥ 50 min 5v5 TOI. These players show statistically significant shift-age performance drops, suggesting they are being kept on ice too long.',
+      players: CHARTED.filter(p=>p.flagged).sort((a,b)=>a.decay_coef-b.decay_coef).slice(0,10),
+      stat: p => p.decay_coef.toFixed(6), label: 'Coef', pct: p => 100-p.pct_decay,
+      accent: '#dc2626', headBg: '#fff5f5',
+    },
+  ];
 
   return (
     <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 24px'}}>
-      <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:20}}>Player Shift-Decay Profiles</h1>
-      <div style={{display:'flex',gap:12,marginBottom:20,alignItems:'center'}}>
-        <select value={pid} onChange={e=>setPid(+e.target.value)} style={{minWidth:200}}>
-          {filtered.map(p=><option key={p.id} value={p.id}>{p.name} ({p.team})</option>)}
-        </select>
-        <select value={teamFilter} onChange={e=>{setTeamFilter(e.target.value);}}>
-          <option value="All">All teams</option>
-          {TEAMS.map(t=><option key={t} value={t}>{t}</option>)}
-        </select>
-        <button onClick={()=>{setSelectedPlayer(player);setPage('profile');}}
-          style={{marginLeft:'auto',padding:'7px 16px',background:'#1d4ed8',color:'#fff',borderRadius:4,fontSize:13,fontWeight:600}}>
-          Open Full Profile →
-        </button>
+      <div style={{marginBottom:24}}>
+        <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:4}}>Player Stat Leaders</h1>
+        <p style={{fontSize:13,color:'#888'}}>5v5 shift-age analysis · Click any player to open their full profile</p>
       </div>
 
-      <div style={{display:'flex',gap:2,marginBottom:20,borderBottom:'2px solid #e5e5e5'}}>
-        {[['observed','Observed Decay'],['rapm','RAPM Model']].map(([k,l])=>(
-          <button key={k} onClick={()=>setTab(k)} style={{padding:'10px 18px',fontSize:13,fontWeight:600,color:tab===k?'#1d4ed8':'#777',borderBottom:tab===k?'2px solid #1d4ed8':'2px solid transparent',marginBottom:-2}}>
-            {l}
-          </button>
-        ))}
-      </div>
-
-      <div style={{display:'grid',gridTemplateColumns:'1fr 300px',gap:24}}>
-        <div>
-          <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-            <SectionHeader
-              title={tab==='observed'?'On-Ice xGD/60 by Shift Age':'Projected xGD/60 — RAPM Model'}
-              sub={tab==='observed'
-                ?'Observed; each bucket = stints where shift was that old. Shaded band = P25–P75 league range.'
-                :'Smoothed ridge-regression model. Fewer games → coefficients shrink toward zero.'}/>
-            <DecayCurveChart player={tab==='observed'?player:rapmPlayer} width={620} height={240}/>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginTop:16}}>
-              {[['Early xGD/60 (0–30s)', fmt(player.early), player.pct_early],
-                ['Late xGD/60 (45s+)', fmt(player.late), player.pct_late],
-                ['Early-to-late drop', fmt(player.drop), player.pct_drop]
-              ].map(([lbl,val,pct])=>(
-                <div key={lbl} style={{background:'#fafaf9',borderRadius:5,padding:'12px 14px',border:'1px solid #eee'}}>
-                  <div style={{fontSize:11,fontWeight:600,color:'#888',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:6}}>{lbl}</div>
-                  <div style={{fontSize:22,fontWeight:700,fontFamily:'IBM Plex Mono',letterSpacing:'-0.02em'}}>{val}</div>
-                  <div style={{marginTop:8,display:'inline-block',background:pctBg(pct),color:pctFg(pct),borderRadius:3,padding:'2px 8px',fontSize:11,fontWeight:600,fontFamily:'IBM Plex Mono'}}>{Math.round(pct)}th pct</div>
-                </div>
-              ))}
-            </div>
+      {!RAPM_READY && (
+        <div style={{marginBottom:24,padding:'12px 16px',background:'#fefce8',border:'1px solid #fde68a',borderRadius:6,fontSize:13,color:'#92400e',display:'flex',alignItems:'center',gap:10}}>
+          <span style={{fontSize:16}}>⏳</span>
+          <div>
+            <strong>Player RAPM data is not yet available for this season.</strong>
+            {' '}Stint ingestion may still be running, or the RAPM model has not been fit yet.
+            Line combination data is available in the Lines tab.
           </div>
-
-          {tab==='rapm' && (
-            <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px',marginTop:16,display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:16}}>
-              {[['Base RAPM',fmt(player.base_rapm,4),'Higher = better baseline value'],
-                ['Decay coef',player.decay_coef.toFixed(6),'Negative = performance drops over shift'],
-                ['Break-even',fmtBreak(player.breakeven),'Shift length where model hits zero']
-              ].map(([l,v,s])=>(
-                <div key={l}><div style={{fontSize:11,fontWeight:600,color:'#888',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:4}}>{l}</div>
-                  <div style={{fontSize:22,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{v}</div>
-                  <div style={{fontSize:11,color:'#aaa',marginTop:4}}>{s}</div></div>
-              ))}
-            </div>
-          )}
         </div>
+      )}
 
-        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'16px'}}>
-          <div style={{fontSize:12,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:12}}>Biggest Early→Late Drops</div>
-          <div style={{fontSize:11,color:'#aaa',marginBottom:10}}>Min 30 min TOI. Click to load.</div>
-          {bigDrops.map(p=>(
-            <button key={p.id} onClick={()=>setPid(p.id)} style={{
-              width:'100%',padding:'8px 10px',textAlign:'left',borderRadius:4,display:'flex',justifyContent:'space-between',alignItems:'center',
-              background:pid===p.id?'#eff6ff':'transparent',borderLeft:pid===p.id?'3px solid #1d4ed8':'3px solid transparent'
-            }}>
-              <div>
-                <div style={{fontSize:12,fontWeight:600,color:'#111'}}>{p.name}</div>
-                <div style={{fontSize:11,color:'#999'}}>{p.team} · Early {fmt(p.early,1)} → Late {fmt(p.late,1)}</div>
+      {/* Search bar */}
+      <div style={{position:'relative',marginBottom:24}}>
+        <span style={{position:'absolute',left:14,top:'50%',transform:'translateY(-50%)',color:'#bbb',fontSize:17,pointerEvents:'none'}}>⌕</span>
+        <input
+          type="text"
+          placeholder="Search by player name or team…"
+          value={search}
+          onChange={e=>setSearch(e.target.value)}
+          style={{width:'100%',padding:'11px 40px',fontSize:14,border:'1px solid #d1d5db',borderRadius:6,outline:'none',
+            fontFamily:'IBM Plex Sans, sans-serif',boxSizing:'border-box',background:'#fff'}}
+        />
+        {search && (
+          <button onClick={()=>setSearch('')}
+            style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',color:'#bbb',fontSize:16,cursor:'pointer',lineHeight:1}}>
+            ✕
+          </button>
+        )}
+      </div>
+
+      {/* Search results */}
+      {searchResults && (
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'16px 20px',marginBottom:28}}>
+          <div style={{fontSize:12,fontWeight:600,color:'#888',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:12}}>
+            {searchResults.length} player{searchResults.length!==1?'s':''} matching "{search}"
+          </div>
+          {searchResults.length===0
+            ? <div style={{color:'#aaa',fontSize:13,padding:'12px 0'}}>No players found.</div>
+            : <table>
+                <thead><tr>
+                  <th style={{textAlign:'left'}}>Player</th>
+                  <th>Team</th><th>Pos</th>
+                  <th title="Isolated on-ice impact at shift start">Base RAPM</th>
+                  <th title="xGD/60 in first 30s of shift">Early xGD</th>
+                  <th title="xGD/60 after 45s on ice">Late xGD</th>
+                  <th title="Late minus Early — negative means fades">Drop</th>
+                  <th>TOI (min)</th><th>Flag</th>
+                </tr></thead>
+                <tbody>{searchResults.map(p=>(
+                  <tr key={p.id} onClick={()=>openPlayer(p)} style={{cursor:'pointer'}}>
+                    <td style={{fontWeight:600,color:'#1d4ed8',whiteSpace:'nowrap'}}>{p.name}</td>
+                    <td>{p.team}</td><td>{p.pos}</td>
+                    <PctCell pct={p.pct_rapm}  value={fmt(p.base_rapm,4)}/>
+                    <PctCell pct={p.pct_early} value={fmt(p.early,2)}/>
+                    <PctCell pct={p.pct_late}  value={fmt(p.late,2)}/>
+                    <PctCell pct={p.pct_drop}  value={fmt(p.drop,2)}/>
+                    <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{p.toi_min}</td>
+                    <td style={{textAlign:'center'}}>{p.flagged?<span style={{color:'#dc2626',fontWeight:700}}>⚠</span>:<span style={{color:'#ccc'}}>—</span>}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+          }
+        </div>
+      )}
+
+      {/* Stat key */}
+      {!searchResults && (
+        <div style={{background:'#f8f9ff',border:'1px solid #dde4f5',borderRadius:6,padding:'13px 18px',marginBottom:24,fontSize:12,color:'#374151',lineHeight:1.8,display:'flex',flexWrap:'wrap',gap:'4px 24px'}}>
+          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Base RAPM</span> — isolated on-ice impact (ridge regression) at shift start, in xGD/60</span>
+          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Early xGD/60</span> — avg xG differential per 60 in first 30s on ice</span>
+          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Late xGD/60</span> — avg xG differential per 60 after 45s on ice</span>
+          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Drop</span> — Late minus Early (negative = fades with shift age)</span>
+          <span><span style={{fontWeight:700,color:'#1d4ed8'}}>Decay coef</span> — RAPM model slope per second (more negative = faster fade)</span>
+          <span>Cell color: <span style={{background:'#1d4ed8',color:'#fff',borderRadius:3,padding:'0 5px',fontSize:11}}>blue</span> = elite percentile · <span style={{background:'#dc2626',color:'#fff',borderRadius:3,padding:'0 5px',fontSize:11}}>red</span> = bottom</span>
+        </div>
+      )}
+
+      {/* Leaderboard grid */}
+      {!searchResults && (
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:18}}>
+          {boards.map(board=>(
+            <div key={board.title} style={{background:board.headBg||'#fff',border:`1px solid ${board.accent?'#fecaca':'#e8e8e8'}`,borderRadius:6,overflow:'hidden'}}>
+              <div style={{padding:'14px 16px 10px',borderBottom:'1px solid #f0f0f0',background:board.headBg||'#fff'}}>
+                <div style={{fontSize:13,fontWeight:700,color:board.accent||'#111',marginBottom:3}}>{board.title}</div>
+                <div style={{fontSize:11,color:'#888',lineHeight:1.5}}>{board.desc}</div>
               </div>
-              <div style={{background:pctBg(p.pct_drop),color:pctFg(p.pct_drop),borderRadius:3,padding:'2px 7px',fontSize:11,fontWeight:600,fontFamily:'IBM Plex Mono'}}>
-                {fmt(p.drop,1)}
-              </div>
-            </button>
+              <table style={{width:'100%',borderCollapse:'collapse'}}>
+                <thead>
+                  <tr style={{background:'#fafafa'}}>
+                    <th style={{textAlign:'left',padding:'6px 12px',fontSize:10,color:'#aaa',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.05em',width:20}}>#</th>
+                    <th style={{textAlign:'left',padding:'6px 4px',fontSize:10,color:'#aaa',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.05em'}}>Player</th>
+                    <th style={{padding:'6px 8px',fontSize:10,color:'#aaa',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.05em'}}>Team</th>
+                    <th style={{padding:'6px 10px',fontSize:10,color:'#aaa',fontWeight:600,textTransform:'uppercase',letterSpacing:'0.05em'}}>{board.label}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {board.players.map((p,i)=>(
+                    <tr key={p.id} onClick={()=>openPlayer(p)} style={{cursor:'pointer',borderTop:'1px solid #f5f5f5'}}
+                      onMouseEnter={e=>e.currentTarget.style.background='#f8faff'}
+                      onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                      <td style={{padding:'7px 12px',fontFamily:'IBM Plex Mono',fontSize:10,color:'#ccc',width:20}}>{i+1}</td>
+                      <td style={{padding:'5px 4px'}}>
+                        <div style={{display:'flex',alignItems:'center',gap:7}}>
+                          <PlayerHeadshot id={p.id} name={p.name} team={p.team} size={28}/>
+                          <div>
+                            <div style={{fontSize:12,fontWeight:600,color:'#1d4ed8'}}>{p.name}</div>
+                            <div style={{fontSize:10,color:'#aaa'}}>{p.pos}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td style={{padding:'7px 8px',textAlign:'center'}}><TeamLogo code={p.team} size={20}/></td>
+                      <PctCell pct={board.pct(p)} value={board.stat(p)}/>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+};
+
+// ── STINTS TABLE ─────────────────────────────────────────────────────────────
+const ZONE_LABELS = {O:'Off. zone', N:'Neutral', D:'Def. zone'};
+const ZONE_COLORS = {O:'#dcfce7', N:'#f3f4f6', D:'#fee2e2'};
+const ZONE_TEXT   = {O:'#166534', N:'#555', D:'#991b1b'};
+
+function fmtPeriod(p) { return p > 3 ? 'OT' : `P${p}`; }
+function fmtTime(sec) {
+  const s = sec % 1200;
+  return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+}
+function fmtScore(n) {
+  if (n === 0) return <span style={{color:'#888'}}>Tied</span>;
+  return n > 0
+    ? <span style={{color:'#166534'}}>Up {n > 1 ? n : ''}</span>
+    : <span style={{color:'#991b1b'}}>Down {n < -1 ? Math.abs(n) : ''}</span>;
+}
+
+const StintsTable = ({player, season}) => {
+  const [stints, setStints]   = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [page, setPage]       = React.useState(0);
+  const [sortCol, setSortCol] = React.useState('game_id');
+  const [sortDir, setSortDir] = React.useState('desc');
+  const [zoneFilter, setZoneFilter] = React.useState('');
+  const [expanded, setExpanded] = React.useState(null);
+  const [minDur, setMinDur]     = React.useState(10);
+  const PAGE = 50;
+
+  const load = () => {
+    setLoading(true);
+    fetch(`/player/${player.id}/stints?season=${season}`)
+      .then(r => r.json())
+      .then(d => { setStints(d.stints || []); setLoading(false); })
+      .catch(() => { setStints([]); setLoading(false); });
+  };
+
+  const toggleSort = col => {
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortCol(col); setSortDir('desc'); }
+    setPage(0);
+  };
+
+  if (!stints) {
+    return (
+      <div style={{textAlign:'center',padding:'24px 0'}}>
+        <button onClick={load} disabled={loading} style={{
+          background:'#1d4ed8', color:'#fff', border:'none', borderRadius:5,
+          padding:'10px 24px', fontSize:13, fontWeight:600, cursor:'pointer',
+          opacity: loading ? 0.6 : 1,
+        }}>{loading ? 'Loading…' : `Load shifts`}</button>
+        <div style={{fontSize:11,color:'#aaa',marginTop:6}}>Individual 5v5 player shifts (consecutive on-ice sequences grouped together)</div>
       </div>
+    );
+  }
+
+  const filtered = stints.filter(s => s.duration >= minDur && (!zoneFilter || s.zone === zoneFilter));
+  const cmpDir   = sortDir === 'asc' ? 1 : -1;
+  const sorted   = [...filtered].sort((a,b) => {
+    const v = a[sortCol] < b[sortCol] ? -1 : a[sortCol] > b[sortCol] ? 1 : 0;
+    return v * cmpDir;
+  });
+  const pageData  = sorted.slice(page * PAGE, (page+1) * PAGE);
+  const totalPages = Math.ceil(sorted.length / PAGE);
+
+  // zone summary
+  const zoneCounts = {O:0,N:0,D:0};
+  stints.forEach(s => { if (zoneCounts[s.zone] != null) zoneCounts[s.zone]++; });
+  const total = stints.length;
+
+  const Th = ({col, label, right}) => {
+    const active = sortCol === col;
+    return (
+      <th onClick={() => toggleSort(col)} style={{cursor:'pointer',textAlign:right?'right':'left',
+        color:active?'#1d4ed8':'#666', userSelect:'none'}}>
+        {label}{active ? (sortDir==='asc' ? ' ↑' : ' ↓') : ''}
+      </th>
+    );
+  };
+
+  return (
+    <div>
+      <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12,flexWrap:'wrap'}}>
+        <div style={{fontSize:13,color:'#666',fontWeight:500}}>{sorted.length.toLocaleString()} shifts</div>
+        <div style={{display:'flex',gap:4}}>
+          {[0,10,20,30].map(d => (
+            <button key={d} onClick={() => { setMinDur(d); setPage(0); }} style={{
+              padding:'3px 9px', fontSize:11, fontWeight:600, borderRadius:4, border:'1px solid',
+              borderColor: minDur===d ? '#374151' : '#ddd',
+              background: minDur===d ? '#f3f4f6' : '#fff',
+              color: minDur===d ? '#111' : '#888', cursor:'pointer',
+            }}>{d===0?'All':`≥${d}s`}</button>
+          ))}
+        </div>
+        <div style={{width:1,height:16,background:'#e5e5e5'}}/>
+        <div style={{display:'flex',gap:6}}>
+          {['','O','N','D'].map(z => (
+            <button key={z} onClick={() => { setZoneFilter(z); setPage(0); }} style={{
+              padding:'3px 10px', fontSize:11, fontWeight:600, borderRadius:4, border:'1px solid',
+              borderColor: zoneFilter===z ? '#1d4ed8' : '#ddd',
+              background: zoneFilter===z ? '#eff6ff' : '#fff',
+              color: zoneFilter===z ? '#1d4ed8' : '#555', cursor:'pointer',
+            }}>{z===''?'All zones':ZONE_LABELS[z]}</button>
+          ))}
+        </div>
+        {total > 0 && (
+          <div style={{marginLeft:'auto',fontSize:11,color:'#aaa',display:'flex',gap:12}}>
+            {Object.entries(zoneCounts).map(([z,n]) => (
+              <span key={z} style={{background:ZONE_COLORS[z],color:ZONE_TEXT[z],borderRadius:3,padding:'1px 7px',fontWeight:600}}>
+                {ZONE_LABELS[z]} {Math.round(n/total*100)}%
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{border:'1px solid #e8e8e8',borderRadius:6,overflow:'hidden'}}>
+        <table style={{fontSize:12}}>
+          <thead><tr style={{background:'#fafafa'}}>
+            <Th col="game_id" label="Game"/>
+            <Th col="period" label="Per" right/>
+            <th style={{textAlign:'right',color:'#666'}}>Time</th>
+            <Th col="duration" label="Length" right/>
+            <Th col="zone" label="Zone"/>
+            <Th col="score" label="Score" right/>
+            <Th col="xgd" label="xGD" right/>
+            <th style={{textAlign:'right',color:'#ccc',fontSize:10,fontWeight:400}}>segs</th>
+          </tr></thead>
+          <tbody>
+            {pageData.map((s,i) => {
+              const isExp = expanded === `${s.game_id}-${s.period}-${s.start_sec}`;
+              const xgdColor = s.xgd > 0.005 ? '#166534' : s.xgd < -0.005 ? '#991b1b' : '#555';
+              return (
+                <tr key={i} onClick={() => setExpanded(isExp ? null : `${s.game_id}-${s.period}-${s.start_sec}`)}
+                  style={{cursor:'pointer', background: isExp ? '#f0f4ff' : 'transparent',
+                    borderTop:'1px solid #f5f5f5'}}>
+                  <td style={{fontFamily:'IBM Plex Mono',color:'#888',fontSize:11}}>{s.game_id}</td>
+                  <td style={{textAlign:'right',fontFamily:'IBM Plex Mono'}}>{fmtPeriod(s.period)}</td>
+                  <td style={{textAlign:'right',fontFamily:'IBM Plex Mono',color:'#aaa'}}>{fmtTime(s.start_sec)}</td>
+                  <td style={{textAlign:'right',fontFamily:'IBM Plex Mono',fontWeight:600}}>{s.duration}s</td>
+                  <td>
+                    <span style={{background:ZONE_COLORS[s.zone]||'#f3f4f6',color:ZONE_TEXT[s.zone]||'#555',
+                      borderRadius:3,padding:'1px 6px',fontWeight:600,fontSize:10}}>
+                      {ZONE_LABELS[s.zone]||s.zone}
+                    </span>
+                  </td>
+                  <td style={{textAlign:'right'}}>{fmtScore(s.score)}</td>
+                  <td style={{textAlign:'right',fontFamily:'IBM Plex Mono',fontWeight:600,color:xgdColor}}>
+                    {s.xgd >= 0 ? '+' : ''}{s.xgd.toFixed(4)}
+                  </td>
+                  <td style={{textAlign:'right',fontFamily:'IBM Plex Mono',fontSize:11,color:'#ccc'}}>{s.n_segs||1}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {totalPages > 1 && (
+        <div style={{display:'flex',justifyContent:'center',gap:6,marginTop:12,alignItems:'center'}}>
+          <button onClick={() => setPage(p => Math.max(0,p-1))} disabled={page===0}
+            style={{padding:'4px 12px',borderRadius:4,border:'1px solid #ddd',cursor:'pointer',fontSize:12,background:'#fff'}}>
+            ‹ Prev
+          </button>
+          <span style={{fontSize:12,color:'#888'}}>Page {page+1} of {totalPages} ({sorted.length.toLocaleString()} stints)</span>
+          <button onClick={() => setPage(p => Math.min(totalPages-1,p+1))} disabled={page===totalPages-1}
+            style={{padding:'4px 12px',borderRadius:4,border:'1px solid #ddd',cursor:'pointer',fontSize:12,background:'#fff'}}>
+            Next ›
+          </button>
+        </div>
+      )}
     </div>
   );
 };
 
 // ── PLAYER PROFILE ────────────────────────────────────────────────────────────
 const PlayerProfile = ({player, setPage}) => {
+  const [empData, setEmpData] = React.useState(null);
+  const season = window.__DATA__.current_season;
+
+  React.useEffect(() => {
+    if (!player) return;
+    setEmpData(null);
+    fetch(`/player/${player.id}/decay?season=${season}`)
+      .then(r => r.json())
+      .then(d => setEmpData(d))
+      .catch(() => setEmpData({buckets:[], values:[], se:[]}));
+  }, [player?.id, season]);
+
   if (!player) return <div style={{padding:40,color:'#888'}}>No player selected.</div>;
-  const shiftData = AGES.map((t,i)=>({age:t, xgd:player.obs[i], toi: +(player.toi_min/AGES.length).toFixed(2), stints:Math.round(player.stints/AGES.length)}));
+
+  const rapmMaxAge = (empData && empData.max_age) ? empData.max_age : 80;
+  const rapmAges  = [];
+  for (let t = 0; t <= rapmMaxAge; t += 5) rapmAges.push(t);
+  const rapmObs  = rapmAges.map(t => +(player.base_rapm*42 + player.decay_coef*t*42).toFixed(3));
+
   return (
-    <div style={{maxWidth:1100,margin:'0 auto',padding:'32px 24px'}}>
-      <div style={{marginBottom:24}}>
-        <h1 style={{fontSize:32,fontWeight:700,letterSpacing:'-0.025em'}}>{player.name}</h1>
-        <div style={{fontSize:13,color:'#888',marginTop:4,display:'flex',gap:10,alignItems:'center'}}>
-          <Tag bg="#f0f4ff" color="#1d4ed8">{player.team}</Tag>
-          <span>{player.pos}</span><span>·</span><span>5v5</span>
-          {player.flagged && <Tag bg="#fee2e2" color="#dc2626">⚠ Overuse Flagged</Tag>}
+    <div style={{maxWidth:1140,margin:'0 auto',padding:'32px 24px'}}>
+      {/* Header */}
+      <div style={{display:'flex',alignItems:'center',gap:20,marginBottom:24}}>
+        <PlayerHeadshot id={player.id} name={player.name} team={player.team} size={88}/>
+        <div>
+          <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
+            <TeamLogo code={player.team} size={32}/>
+            <h1 style={{fontSize:32,fontWeight:700,letterSpacing:'-0.025em',lineHeight:1}}>{player.name}</h1>
+          </div>
+          <div style={{fontSize:13,color:'#888',display:'flex',gap:10,alignItems:'center'}}>
+            <Tag bg="#f0f4ff" color="#1d4ed8">{player.team}</Tag>
+            <span>{player.pos}</span><span>·</span><span>5v5</span>
+            {player.flagged && <Tag bg="#fee2e2" color="#dc2626">⚠ Overuse Flagged</Tag>}
+          </div>
         </div>
       </div>
 
-      <div style={{display:'grid',gridTemplateColumns:'1fr 200px',gap:24,marginBottom:24}}>
+      {/* Top row: chart + shift breakdown */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 210px',gap:16,marginBottom:16}}>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-          <SectionHeader title="On-Ice xGD/60 by Shift Age" sub="Observed, not modeled. Each bucket = stints where shift was that old. Shaded = P25–P75 of all skaters."/>
-          <DecayCurveChart player={player} width={680} height={240}/>
+          <SectionHeader title="On-Ice xGD/60 by Shift Age"
+            sub="20s rolling window, 5s step (≥20s stints only, ≥60s TOI per window). Grey band = league P25–P75. Dashed = RAPM model."/>
+          {empData === null
+            ? <div style={{height:240,display:'flex',alignItems:'center',justifyContent:'center',color:'#bbb',fontSize:13}}>Loading…</div>
+            : empData.buckets.length < 4
+              ? <div style={{height:240,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:'#999',fontSize:13,gap:6,textAlign:'center'}}>
+                  <div style={{fontSize:14,fontWeight:600,color:'#777'}}>Not enough data for a reliable curve</div>
+                  <div style={{fontSize:12,color:'#aaa'}}>{player.toi_min} min 5v5 TOI · insufficient shift-age coverage</div>
+                </div>
+              : <DecayCurveChart buckets={empData.buckets} values={empData.values} rapmObs={rapmObs} rapmAges={rapmAges}
+                  leagueP25={LEAGUE_P25} leagueP75={LEAGUE_P75} leagueMed={LEAGUE_MED} width={680} height={240}/>
+          }
         </div>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-          <div style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:16}}>Shift Breakdown</div>
-          {[['Fresh (0–30s)',fmt(player.early)],['Mid (30–45s)',fmt(+(player.obs[3]+player.obs[4]).toFixed(2)/2)],
-            ['Late (45s+)',fmt(player.late)],['Early-to-late drop',fmt(player.drop)]
-          ].map(([l,v])=>(
-            <div key={l} style={{marginBottom:16}}>
-              <div style={{fontSize:11,color:'#999',marginBottom:2}}>{l}</div>
-              <div style={{fontSize:22,fontWeight:700,fontFamily:'IBM Plex Mono',letterSpacing:'-0.02em'}}>{v}</div>
+          <div style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:14}}>Shift Breakdown</div>
+          {[
+            ['Fresh (0–30s)', fmt(player.early), player.pct_early],
+            ['Mid (30–45s)',  fmt(+(player.obs[3]+player.obs[4]).toFixed(2)/2), null],
+            ['Late (45s+)',   fmt(player.late),  player.pct_late],
+            ['Durability',    fmt(player.drop),  player.pct_drop],
+          ].map(([l,v,pct])=>(
+            <div key={l} style={{marginBottom:12}}>
+              <div style={{fontSize:10,color:'#aaa',marginBottom:1,display:'flex',justifyContent:'space-between'}}>
+                <span>{l}</span>
+                {pct != null && <span style={{background:pctBg(Math.max(1,pct)),color:pctFg(Math.max(1,pct)),
+                  borderRadius:3,padding:'0 5px',fontSize:10,fontWeight:600}}>{Math.max(1,pct)}th</span>}
+              </div>
+              <div style={{fontSize:20,fontWeight:700,fontFamily:'IBM Plex Mono',letterSpacing:'-0.02em'}}>{v}</div>
             </div>
           ))}
-          <hr style={{border:'none',borderTop:'1px solid #f0f0f0',margin:'12px 0'}}/>
-          <div style={{marginBottom:12}}>
-            <div style={{fontSize:11,color:'#999',marginBottom:2}}>Total 5v5 TOI</div>
-            <div style={{fontSize:22,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{player.toi_min} <span style={{fontSize:14,fontWeight:400}}>min</span></div>
-          </div>
-          <div>
-            <div style={{fontSize:11,color:'#999',marginBottom:2}}>Total stints</div>
-            <div style={{fontSize:22,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{player.stints}</div>
-          </div>
-        </div>
-      </div>
-
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:20}}>
-        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-          <div style={{fontSize:12,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:16}}>Context vs. League</div>
-          <div style={{display:'flex',gap:20}}>
-            <PctBadge pct={player.pct_early} label="Early xGD/60"/>
-            <PctBadge pct={player.pct_late} label="Late xGD/60"/>
-            <PctBadge pct={player.pct_drop} label="Durability"/>
-            <PctBadge pct={player.pct_rapm} label="Base RAPM"/>
-          </div>
-        </div>
-        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-          <div style={{fontSize:12,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:16}}>RAPM Model (Ridge Regression)</div>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12}}>
-            {[['Base RAPM',fmt(player.base_rapm,4)],['Decay coef',player.decay_coef.toFixed(6)],['Break-even',fmtBreak(player.breakeven)]].map(([l,v])=>(
-              <div key={l}><div style={{fontSize:11,color:'#999',marginBottom:2}}>{l}</div>
-                <div style={{fontSize:18,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{v}</div></div>
+          <hr style={{border:'none',borderTop:'1px solid #f0f0f0',margin:'10px 0'}}/>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+            {[['TOI',`${player.toi_min}m`],['Stints',player.stints.toLocaleString()]].map(([l,v])=>(
+              <div key={l}>
+                <div style={{fontSize:10,color:'#aaa'}}>{l}</div>
+                <div style={{fontSize:16,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{v}</div>
+              </div>
             ))}
           </div>
-          <div style={{fontSize:11,color:'#aaa',marginTop:10,fontStyle:'italic'}}>Coefficients near zero = model needs more data (300+ games).</div>
         </div>
       </div>
 
+      {/* Context row: league percentiles + RAPM */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:16}}>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'16px 20px'}}>
+          <div style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:12}}>Context vs. League</div>
+          <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+            <PctBadge pct={player.pct_early} label="Early xGD/60"/>
+            <PctBadge pct={player.pct_late}  label="Late xGD/60"/>
+            <PctBadge pct={player.pct_drop}  label="Durability"/>
+            <PctBadge pct={player.pct_rapm}  label="Base RAPM"/>
+            <PctBadge pct={player.pct_toi}   label="TOI"/>
+          </div>
+        </div>
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'16px 20px'}}>
+          <div style={{fontSize:11,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.06em',color:'#888',marginBottom:12}}>RAPM Model</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12}}>
+            {[['Base RAPM',fmt(player.base_rapm,4)],['Decay coef',player.decay_coef.toFixed(6)],['Break-even',fmtBreak(player.breakeven)]].map(([l,v])=>(
+              <div key={l}><div style={{fontSize:10,color:'#aaa',marginBottom:2}}>{l}</div>
+                <div style={{fontSize:17,fontWeight:700,fontFamily:'IBM Plex Mono'}}>{v}</div></div>
+            ))}
+          </div>
+          <div style={{fontSize:10,color:'#bbb',marginTop:8,fontStyle:'italic'}}>Ridge regression — coefficients near zero = needs more data (300+ games).</div>
+        </div>
+      </div>
+
+
+      {/* Stint list */}
       <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-        <SectionHeader title="Shift-Age Breakdown Table"/>
-        <table>
-          <thead><tr><th style={{textAlign:'left'}}>Shift age (s)</th><th>xGD/60</th><th>TOI (min)</th><th>Stints</th></tr></thead>
-          <tbody>{shiftData.map(r=>(
-            <tr key={r.age}>
-              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{r.age}</td>
-              <PctCell pct={rankField([...shiftData.map((d,i)=>({id:i,v:d.xgd})),{id:99,v:r.xgd}],'v',true)[shiftData.findIndex(d=>d.age===r.age)]} value={fmt(r.xgd)}/>
-              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{r.toi}</td>
-              <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{r.stints}</td>
-            </tr>
-          ))}</tbody>
-        </table>
+        <SectionHeader title="Individual Shifts" sub="Each row = one player shift. Clock-adjacent sub-stints (same player on ice across a line change) are merged into one. 'Segs' = how many sub-stints were merged. Stoppages (face-offs, icings) always break a shift."/>
+        <StintsTable player={player} season={season}/>
       </div>
     </div>
   );
@@ -691,84 +1110,173 @@ const LinesPage = () => {
 };
 
 // ── TEAM REPORT ───────────────────────────────────────────────────────────────
-const TeamReportPage = ({setPage,setSelectedPlayer}) => {
+const TeamReportPage = ({setPage, setSelectedPlayer}) => {
   const [team, setTeam] = useState(TEAMS[0]||'');
+  const [tip, setTip] = useState(null);
   const roster = PLAYERS.filter(p=>p.team===team).sort((a,b)=>b.toi_min-a.toi_min);
   const flags = roster.filter(p=>p.flagged).length;
-  const avgD = roster.length?(roster.reduce((s,p)=>s+p.decay_coef,0)/roster.length).toFixed(6):'N/A';
+  const avgD  = roster.length ? (roster.reduce((s,p)=>s+p.decay_coef,0)/roster.length).toFixed(6) : 'N/A';
   const breaks = roster.filter(p=>p.breakeven!=null).map(p=>p.breakeven).sort((a,b)=>a-b);
-  const medB = breaks.length?fmtBreak(breaks[Math.floor(breaks.length/2)]):'N/A';
+  const medB  = breaks.length ? fmtBreak(breaks[Math.floor(breaks.length/2)]) : 'N/A';
+  const openPlayer = p => { setSelectedPlayer(p); setPage('profile'); };
 
-  // Overlay chart for all players on team
-  const m={top:14,right:20,bottom:40,left:52};
-  const W=560, H=200, cW=W-m.left-m.right, cH=H-m.top-m.bottom;
-  const allObs = roster.flatMap(p=>p.obs);
-  const yMin=Math.floor(Math.min(...(allObs.length?allObs:[0]),LEAGUE_P25[0])-0.5);
-  const yMax=Math.ceil(Math.max(...(allObs.length?allObs:[0]),LEAGUE_P75[0])+0.5);
-  const xS=t=>(t/80)*cW, yS=v=>cH-((v-yMin)/(yMax-yMin))*cH;
-  const yTicks=[]; for(let v=Math.ceil(yMin);v<=yMax;v+=2)yTicks.push(v);
+  // ── Quality vs. Durability scatter ──────────────────────────────────────────
+  const scW=480, scH=280;
+  const sm={top:20,right:20,bottom:48,left:56};
+  const sW=scW-sm.left-sm.right, sH=scH-sm.top-sm.bottom;
+  const xs=roster.map(p=>p.decay_coef), ys=roster.map(p=>p.base_rapm);
+  const xPad=0.00005, yPad=0.005;
+  const xMin=(xs.length?Math.min(...xs):-.001)-xPad, xMax=(xs.length?Math.max(...xs):.001)+xPad;
+  const yMin=(ys.length?Math.min(...ys):-.1)-yPad,   yMax=(ys.length?Math.max(...ys):.1)+yPad;
+  const sxS=v=>((v-xMin)/(xMax-xMin))*sW;
+  const syS=v=>sH-((v-yMin)/(yMax-yMin))*sH;
+  // quadrant labels
+  const quadrants = [
+    {x:sW*0.75,y:10,  label:'Elite and Durable',color:'#15803d'},
+    {x:sW*0.05,y:10,  label:'Elite but Fades',  color:'#b45309'},
+    {x:sW*0.75,y:sH-6,label:'Safe but Low Output', color:'#6b7280'},
+    {x:sW*0.05,y:sH-6,label:'Avoid',             color:'#dc2626'},
+  ];
 
-  const bandPath = [
-    ...LEAGUE_P75.map((v,i)=>`${i?'L':'M'} ${xS(AGES[i])} ${yS(v)}`),
-    ...LEAGUE_P25.slice().reverse().map((v,i)=>`L ${xS(AGES[AGES.length-1-i])} ${yS(v)}`),
-    'Z'
-  ].join(' ');
+  const handleScatterMove = (e, p) => {
+    const rect = e.currentTarget.closest('svg').getBoundingClientRect();
+    setTip({p, x: e.clientX - rect.left, y: e.clientY - rect.top});
+  };
+
+  // ── Deployment guide groups ──────────────────────────────────────────────────
+  const deployGroups = [
+    {
+      label: 'Elite and Durable', color: '#15803d', bg: '#f0fdf4',
+      advice: 'Long shifts OK. Play in all situations.',
+      players: roster.filter(p => p.base_rapm > 0 && p.decay_coef >= 0),
+    },
+    {
+      label: 'Elite but Fades', color: '#b45309', bg: '#fffbeb',
+      advice: 'Keep shifts short. Swap out before 40s.',
+      players: roster.filter(p => p.base_rapm > 0 && p.decay_coef < 0),
+    },
+    {
+      label: 'Safe but Low Output', color: '#6b7280', bg: '#f9fafb',
+      advice: 'Depth minutes. Shift length flexible.',
+      players: roster.filter(p => p.base_rapm <= 0 && p.decay_coef >= 0),
+    },
+    {
+      label: 'Avoid', color: '#dc2626', bg: '#fff5f5',
+      advice: 'Minimize deployment. Negative from puck drop.',
+      players: roster.filter(p => p.base_rapm <= 0 && p.decay_coef < 0),
+    },
+  ].filter(g => g.players.length > 0);
 
   return (
     <div style={{maxWidth:1200,margin:'0 auto',padding:'32px 24px'}}>
-      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:24}}>
-        <div>
-          <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:4}}>Team Deployment Report</h1>
-          <p style={{fontSize:13,color:'#888'}}>Shift-decay profiles for a single team's skaters</p>
+      {/* Header */}
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:24}}>
+        <div style={{display:'flex',alignItems:'center',gap:16}}>
+          <TeamLogo code={team} size={52}/>
+          <div>
+            <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:4}}>Team Deployment Report</h1>
+            <p style={{fontSize:13,color:'#888'}}>Quality and durability profiles for each skater · 5v5</p>
+          </div>
         </div>
         <select value={team} onChange={e=>setTeam(e.target.value)} style={{minWidth:120}}>
           {TEAMS.map(t=><option key={t} value={t}>{t}</option>)}
         </select>
       </div>
 
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:28}}>
+      {/* KPI row */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:24}}>
         <KPICard label="Players in sample" value={roster.length} accent="#1d4ed8"/>
-        <KPICard label="Overuse flags" value={flags} accent={flags>0?'#dc2626':'#16a34a'}/>
+        <KPICard label="Overuse-risk skaters" value={flags} sub="Bottom 15% decay among high-TOI players" accent={flags>0?'#dc2626':'#16a34a'}/>
         <KPICard label="Team avg decay" value={avgD} accent="#8b5cf6"/>
-        <KPICard label="Avg break-even" value={medB} accent="#0891b2"/>
+        <KPICard label="Median break-even" value={medB} accent="#0891b2"/>
       </div>
 
-      <div style={{display:'grid',gridTemplateColumns:'3fr 2fr',gap:20,marginBottom:20}}>
-        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-          <SectionHeader title="Decay Curves — All Skaters" sub="Each line = one player. Shaded band = league P25–P75."/>
-          <svg width={W} height={H}>
-            <g transform={`translate(${m.left},${m.top})`}>
-              <path d={bandPath} fill="#e2eaf6" opacity="0.5"/>
-              <line x1={0} y1={yS(0)} x2={cW} y2={yS(0)} stroke="#ddd"/>
-              {yTicks.map(v=>(
-                <g key={v}><line x1={0} y1={yS(v)} x2={cW} y2={yS(v)} stroke="#f2f2f2"/>
-                  <text x={-8} y={yS(v)+4} textAnchor="end" fontSize="10" fill="#aaa" fontFamily="IBM Plex Mono">{v}</text></g>
-              ))}
-              {roster.map(p=>(
-                <path key={p.id} d={p.obs.map((v,i)=>`${i?'L':'M'} ${xS(AGES[i])} ${yS(v)}`).join(' ')}
-                  stroke={p.flagged?'#dc2626':'#1d4ed8'} strokeWidth="1.5" fill="none" opacity="0.6"/>
-              ))}
-              {AGES.map(t=>(<text key={t} x={xS(t)} y={cH+20} textAnchor="middle" fontSize="10" fill="#bbb" fontFamily="IBM Plex Mono">{t}</text>))}
-              <text x={cW/2} y={cH+36} textAnchor="middle" fontSize="12" fill="#888">Shift age (seconds)</text>
-            </g>
-          </svg>
+      {/* Main two-column section */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20,marginBottom:20}}>
+
+        {/* Quality vs Durability scatter */}
+        <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px',position:'relative'}}>
+          <SectionHeader title="Quality vs. Durability" sub="Each dot = one player. Hover to identify, click to open profile."/>
+          <div style={{fontSize:11,color:'#888',marginBottom:10,display:'flex',gap:16}}>
+            <span><b style={{color:'#1d4ed8'}}>X →</b> Decay coef (right = holds up longer)</span>
+            <span><b style={{color:'#1d4ed8'}}>Y ↑</b> Base RAPM (up = better quality)</span>
+          </div>
+          <div style={{position:'relative',display:'inline-block'}}>
+            <svg width={scW} height={scH} style={{cursor:'crosshair'}} onMouseLeave={()=>setTip(null)}>
+              <g transform={`translate(${sm.left},${sm.top})`}>
+                {/* quadrant shading */}
+                <rect x={sxS(0)} y={0} width={sW-sxS(0)} height={syS(0)} fill="#f0fdf4" opacity="0.6"/>
+                <rect x={0} y={0} width={sxS(0)} height={syS(0)} fill="#fffbeb" opacity="0.5"/>
+                <rect x={sxS(0)} y={syS(0)} width={sW-sxS(0)} height={sH-syS(0)} fill="#f9fafb" opacity="0.4"/>
+                <rect x={0} y={syS(0)} width={sxS(0)} height={sH-syS(0)} fill="#fff5f5" opacity="0.5"/>
+                {/* zero lines */}
+                <line x1={0} y1={syS(0)} x2={sW} y2={syS(0)} stroke="#ddd" strokeWidth="1"/>
+                <line x1={sxS(0)} y1={0} x2={sxS(0)} y2={sH} stroke="#ddd" strokeWidth="1"/>
+                {/* quadrant labels */}
+                {quadrants.map(q=>(
+                  <text key={q.label} x={q.x} y={q.y} fontSize="9" fill={q.color} opacity="0.7"
+                    fontFamily="IBM Plex Sans, sans-serif" fontWeight="600" textAnchor={q.x>sW/2?'end':'start'}>{q.label}</text>
+                ))}
+                {/* dots */}
+                {roster.map(p=>(
+                  <circle key={p.id}
+                    cx={sxS(p.decay_coef)} cy={syS(p.base_rapm)} r={Math.max(4, Math.min(8, p.toi_min/15))}
+                    fill={p.flagged?'#dc2626':'#1d4ed8'} opacity="0.75" stroke="#fff" strokeWidth="1.2"
+                    style={{cursor:'pointer'}}
+                    onClick={()=>openPlayer(p)}
+                    onMouseEnter={e=>handleScatterMove(e,p)}
+                    onMouseMove={e=>handleScatterMove(e,p)}
+                    onMouseLeave={()=>setTip(null)}/>
+                ))}
+                {/* axes */}
+                {[xMin+(xMax-xMin)*0.25, xMin+(xMax-xMin)*0.5, xMin+(xMax-xMin)*0.75].map((v,i)=>(
+                  <text key={i} x={sxS(v)} y={sH+18} textAnchor="middle" fontSize="9" fill="#bbb" fontFamily="IBM Plex Mono">{v.toFixed(4)}</text>
+                ))}
+                <text x={sW/2} y={sH+36} textAnchor="middle" fontSize="11" fill="#888">Decay coefficient</text>
+                <text x={-42} y={sH/2} textAnchor="middle" fontSize="11" fill="#888" transform={`rotate(-90,-42,${sH/2})`}>Base RAPM</text>
+                {[yMin+(yMax-yMin)*0.25,yMin+(yMax-yMin)*0.5,yMin+(yMax-yMin)*0.75].map((v,i)=>(
+                  <text key={i} x={-6} y={syS(v)+4} textAnchor="end" fontSize="9" fill="#bbb" fontFamily="IBM Plex Mono">{v.toFixed(3)}</text>
+                ))}
+              </g>
+            </svg>
+            {tip && (
+              <div style={{position:'absolute',left:tip.x+12,top:tip.y-10,background:'#1a1a2e',color:'#fff',
+                borderRadius:6,padding:'8px 11px',fontSize:12,pointerEvents:'none',whiteSpace:'nowrap',
+                boxShadow:'0 4px 16px rgba(0,0,0,0.25)',zIndex:999}}>
+                <div style={{fontWeight:600,marginBottom:2}}>{tip.p.name} <span style={{opacity:0.5,fontWeight:400}}>({tip.p.pos})</span></div>
+                <div style={{fontFamily:'IBM Plex Mono',fontSize:11,color:'#a5b4fc'}}>RAPM <span style={{color:'#fff'}}>{tip.p.base_rapm.toFixed(4)}</span>  Decay <span style={{color:'#fff'}}>{tip.p.decay_coef.toFixed(6)}</span></div>
+                <div style={{fontSize:10,color:'#94a3b8',marginTop:2}}>TOI {tip.p.toi_min} min · Click to open profile</div>
+              </div>
+            )}
+          </div>
+          <div style={{fontSize:10,color:'#bbb',marginTop:6}}>Dot size ∝ 5v5 TOI. <span style={{color:'#dc2626'}}>Red</span> = overuse-flagged.</div>
         </div>
+
+        {/* Deployment guide */}
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-          <SectionHeader title="Break-even Distribution" sub="Shift age where each player projects to 0 xGD/60."/>
-          <div style={{marginTop:8}}>
-            {roster.sort((a,b)=>(a.breakeven??9999)-(b.breakeven??9999)).map(p=>(
-              <div key={p.id} style={{display:'flex',alignItems:'center',gap:8,marginBottom:7}}>
-                <button onClick={()=>{setSelectedPlayer(p);setPage('profile');}} style={{fontSize:12,fontWeight:600,color:'#1d4ed8',minWidth:120,textAlign:'left'}}>{p.name}</button>
-                <div style={{flex:1,height:6,background:'#f0f0f0',borderRadius:3,overflow:'hidden'}}>
-                  {p.breakeven && <div style={{width:`${Math.min(100,(p.breakeven/120)*100)}%`,height:'100%',background:pctBg(p.pct_decay),borderRadius:3}}/>}
+          <SectionHeader title="Deployment Guide" sub="Players grouped by shift-decay quadrant. Click any name to open profile."/>
+          <div style={{marginTop:8,display:'flex',flexDirection:'column',gap:12,maxHeight:320,overflowY:'auto'}}>
+            {deployGroups.map(g=>(
+              <div key={g.label} style={{background:g.bg,borderRadius:6,padding:'10px 12px',border:`1px solid ${g.color}22`}}>
+                <div style={{display:'flex',alignItems:'baseline',gap:8,marginBottom:4}}>
+                  <span style={{fontSize:11,fontWeight:700,color:g.color,textTransform:'uppercase',letterSpacing:'0.06em'}}>{g.label}</span>
+                  <span style={{fontSize:11,color:'#888'}}>{g.advice}</span>
                 </div>
-                <span style={{fontSize:11,fontFamily:'IBM Plex Mono',color:'#888',minWidth:44,textAlign:'right'}}>{fmtBreak(p.breakeven)}</span>
+                <div style={{display:'flex',flexWrap:'wrap',gap:'4px 10px'}}>
+                  {g.players.sort((a,b)=>b.base_rapm-a.base_rapm).map(p=>(
+                    <button key={p.id} onClick={()=>openPlayer(p)}
+                      style={{fontSize:12,fontWeight:600,color:'#1d4ed8',background:'none',border:'none',padding:0,cursor:'pointer'}}>
+                      {p.name}
+                    </button>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
         </div>
       </div>
 
+      {/* Roster table */}
       <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
         <SectionHeader title="Roster Breakdown" sub="Click a player name to open their full profile."/>
         <table>
@@ -777,12 +1285,12 @@ const TeamReportPage = ({setPage,setSelectedPlayer}) => {
           </tr></thead>
           <tbody>{roster.map(p=>(
             <tr key={p.id}>
-              <td><button onClick={()=>{setSelectedPlayer(p);setPage('profile');}} style={{color:'#1d4ed8',fontWeight:600,fontSize:13}}>{p.name}</button></td>
+              <td><button onClick={()=>openPlayer(p)} style={{color:'#1d4ed8',fontWeight:600,fontSize:13}}>{p.name}</button></td>
               <td style={{textAlign:'center',color:'#888',fontSize:12}}>{p.pos}</td>
-              <PctCell pct={p.pct_rapm} value={fmt(p.base_rapm,4)}/>
+              <PctCell pct={p.pct_rapm}  value={fmt(p.base_rapm,4)}/>
               <PctCell pct={p.pct_decay} value={p.decay_coef.toFixed(6)}/>
               <PctCell pct={p.pct_early} value={fmt(p.early)}/>
-              <PctCell pct={p.pct_late} value={fmt(p.late)}/>
+              <PctCell pct={p.pct_late}  value={fmt(p.late)}/>
               <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{p.toi_min}</td>
               <td style={{fontFamily:'IBM Plex Mono',fontSize:12}}>{fmtBreak(p.breakeven)}</td>
               <td style={{textAlign:'center'}}>{p.flagged?<Tag bg="#fee2e2" color="#dc2626">⚠ Yes</Tag>:<span style={{color:'#aaa',fontSize:12}}>—</span>}</td>
@@ -822,7 +1330,7 @@ const App = () => {
     <div style={{minHeight:'100vh',background:'#f8f8f7'}}>
       <TopNav page={page==='profile'?'players':page} setPage={goPage} season={urlSeason} onSeasonChange={onSeasonChange} breadcrumb={breadcrumbs[page]}/>
       {page==='overview' && <OverviewPage setPage={goPage} setSelectedPlayer={setSelectedPlayer}/>}
-      {page==='players'  && <PlayersPage setPage={goPage} setSelectedPlayer={setSelectedPlayer} selectedPlayer={selectedPlayer}/>}
+      {page==='players'  && <PlayersPage setPage={goPage} setSelectedPlayer={setSelectedPlayer}/>}
       {page==='profile'  && <PlayerProfile player={selectedPlayer} setPage={goPage}/>}
       {page==='lines'    && <LinesPage/>}
       {page==='team'     && <TeamReportPage setPage={goPage} setSelectedPlayer={setSelectedPlayer}/>}
