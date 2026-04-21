@@ -10,22 +10,27 @@ Then open: http://localhost:8080
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from config.settings import cfg
 from fastapi.responses import JSONResponse
 
 from src.ingestion.roster import get_cached_names
 from src.models.player_decay import _get_player_index, get_league_decay_summary, get_player_rolling_decay
-from src.models.line_analysis import get_line_stats, get_overused_lines, load_stints
+from src.models.line_analysis import get_forward_line_stats, get_forward_line_overuse, load_stints
 
 TEMPLATE = (Path(__file__).parent / "template.html").read_text()
+WEB_DIR = Path(__file__).parent
+APP_SOURCE = WEB_DIR / "app.jsx"
+APP_BUNDLE = WEB_DIR / "app.bundle.js"
+ESBUILD_BIN = Path(__file__).resolve().parent.parent.parent / "node_modules" / ".bin" / "esbuild"
 AGES = [0, 10, 20, 30, 40, 50, 60, 70, 80]
 MIN_TOI_MIN = 10.0        # players with less 5v5 TOI are excluded from all views
 OVERUSE_TOI_MIN = 50.0    # minimum TOI to be considered for overuse flag
@@ -34,6 +39,35 @@ SHIFT_GAP_TOLERANCE = 15
 MIN_QUALIFYING_SHIFT_SECONDS = 10
 MIN_QUALIFYING_SHIFTS = 200
 app = FastAPI()
+
+
+def _ensure_app_bundle() -> None:
+    if not APP_SOURCE.exists():
+        raise FileNotFoundError(f"Web app source not found: {APP_SOURCE}")
+
+    needs_build = (
+        not APP_BUNDLE.exists()
+        or APP_BUNDLE.stat().st_mtime < APP_SOURCE.stat().st_mtime
+        or APP_BUNDLE.stat().st_mtime < (WEB_DIR / "template.html").stat().st_mtime
+    )
+    if not needs_build:
+        return
+
+    if not ESBUILD_BIN.exists():
+        raise FileNotFoundError(f"esbuild not found: {ESBUILD_BIN}")
+
+    subprocess.run(
+        [
+            str(ESBUILD_BIN),
+            str(APP_SOURCE),
+            "--outfile=" + str(APP_BUNDLE),
+            "--format=iife",
+            "--target=es2018",
+            "--minify",
+        ],
+        check=True,
+        cwd=str(Path(__file__).resolve().parent.parent.parent),
+    )
 
 
 def _pct_ranks(values: list[float], higher_is_better: bool = True) -> list[int]:
@@ -73,6 +107,13 @@ def _available_seasons() -> list[str]:
 
 def _has_rapm(season: str) -> bool:
     return (cfg.paths.processed / f"rapm_results_{season}.parquet").exists()
+
+
+def _normalize_team_code(team: str | None, season: str) -> str:
+    code = str(team or "?").upper()
+    if season >= "20242025" and code == "ARI":
+        return "UTA"
+    return code
 
 
 def _window_overlap_stats(
@@ -128,6 +169,7 @@ def _build_data(season: str) -> dict:
         }
 
     name_map = get_cached_names()
+    season_team_map = _get_player_team_map(season)
     shift_counts = _get_player_shift_counts(season)
     qualified_idx = idx[idx["duration"] >= MIN_QUALIFYING_SHIFT_SECONDS].copy()
 
@@ -155,7 +197,7 @@ def _build_data(season: str) -> dict:
         players.append({
             "id":         pid,
             "name":       str(info.get("name", f"Player_{pid}")),
-            "team":       str(info.get("team", "?")),
+            "team":       _normalize_team_code(season_team_map.get(pid) or info.get("team", "?"), season),
             "pos":        str(info.get("position", "F")),
             "overall_xgd": round(xgd60, 2),
             "durability": round(drop, 2),
@@ -222,6 +264,7 @@ def _build_data(season: str) -> dict:
         pass
 
     lines = _build_lines(season)
+    league_empirical_curve = _get_league_empirical_curve(season)
 
     return {
         "players":        players,
@@ -229,6 +272,7 @@ def _build_data(season: str) -> dict:
         "league_p25":     league_p25,
         "league_p75":     league_p75,
         "league_med":     league_med,
+        "league_empirical_curve": league_empirical_curve,
         "seasons":        _available_seasons(),
         "current_season": season,
         "rapm_ready":     True,
@@ -238,17 +282,17 @@ def _build_data(season: str) -> dict:
 
 
 def _build_lines(season: str) -> list[dict]:
-    import pandas as pd
     name_map = get_cached_names()
+    pos_map  = {int(pid): str(info.get("position", "F")) for pid, info in name_map.items()}
     lines: list[dict] = []
     try:
-        stats   = get_line_stats(season, min_toi_sec=60)
-        overuse = get_overused_lines(season, min_toi_min=1.0)
+        stats  = get_forward_line_stats(season, pos_map, min_toi_sec=600)
+        overuse = get_forward_line_overuse(season, pos_map, min_toi_min=10.0)
 
         ou_lookup: dict[tuple, dict] = {}
         if not overuse.empty:
             for _, row in overuse.iterrows():
-                key = tuple(sorted(int(x) for x in row["home_skaters"]))
+                key = tuple(row["fwd_line"])
                 ou_lookup[key] = {
                     "early_xgd": round(float(row.get("early_xgd60", 0)), 2),
                     "late_xgd":  round(float(row.get("late_xgd60",  0)), 2),
@@ -256,12 +300,17 @@ def _build_lines(season: str) -> list[dict]:
                     "flagged":   bool(row.get("overuse_flag", False)),
                 }
 
-        for _, row in stats.head(200).iterrows():
-            skaters = list(row["home_skaters"])
-            key     = tuple(sorted(int(x) for x in skaters))
-            label   = " / ".join(
-                name_map.get(int(pid), {}).get("name", str(pid)) for pid in skaters
-            )
+        for _, row in stats.head(300).iterrows():
+            skaters = list(row["fwd_line"])
+            player_parts = [
+                {
+                    "id": int(pid),
+                    "name": name_map.get(int(pid), {}).get("name", str(pid)),
+                }
+                for pid in skaters
+            ]
+            key     = tuple(skaters)
+            label   = " / ".join(part["name"] for part in player_parts)
             team_id = next(
                 (name_map.get(int(pid), {}).get("team") for pid in skaters
                  if name_map.get(int(pid), {}).get("team")),
@@ -273,7 +322,8 @@ def _build_lines(season: str) -> list[dict]:
             l_xgd = ou.get("late_xgd",  round(xgd60 - 0.5, 2))
             lines.append({
                 "players":   label,
-                "team":      team_id,
+                "player_parts": player_parts,
+                "team":      _normalize_team_code(team_id, season),
                 "toi_min":   round(float(row["toi_min"]), 1),
                 "xgd60":     xgd60,
                 "xgf":       round(float(row.get("xgf_pct", 0.5)) * 100, 1),
@@ -294,9 +344,54 @@ def _build_lines(season: str) -> list[dict]:
 _CACHE: dict[str, dict] = {}
 
 
+def _web_payload_cache_path(season: str) -> Path:
+    return cfg.paths.cache / f"web_payload_{season}.json"
+
+
+def _web_payload_cache_is_fresh(season: str, cache_path: Path) -> bool:
+    if not cache_path.exists():
+        return False
+
+    cache_mtime = cache_path.stat().st_mtime
+    deps = [
+        cfg.paths.processed / f"stints_{season}.parquet",
+        cfg.paths.cache / "player_names.json",
+        Path(__file__),
+        WEB_DIR / "template.html",
+        APP_SOURCE,
+    ]
+    for dep in deps:
+        if dep.exists() and dep.stat().st_mtime > cache_mtime:
+            return False
+    return True
+
+
+def _load_cached_web_payload(season: str) -> dict | None:
+    cache_path = _web_payload_cache_path(season)
+    if not _web_payload_cache_is_fresh(season, cache_path):
+        return None
+    try:
+        return json.loads(cache_path.read_text())
+    except Exception:
+        return None
+
+
+def _save_cached_web_payload(season: str, data: dict) -> None:
+    cache_path = _web_payload_cache_path(season)
+    try:
+        cache_path.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
 def _get_data(season: str) -> dict:
     if season not in _CACHE:
-        _CACHE[season] = _build_data(season)
+        cached = _load_cached_web_payload(season)
+        if cached is not None:
+            _CACHE[season] = cached
+        else:
+            _CACHE[season] = _build_data(season)
+            _save_cached_web_payload(season, _CACHE[season])
     return _CACHE[season]
 
 
@@ -352,44 +447,56 @@ def _get_league_empirical_curve(
     bucket_size: int = 10,
     min_stint_sec: int = 10,
 ) -> dict:
+    cache_key = (season, bucket_size, min_stint_sec)
+    if cache_key in _LEAGUE_EMPIRICAL_CURVE_CACHE:
+        return _LEAGUE_EMPIRICAL_CURVE_CACHE[cache_key]
+
     idx = _get_stint_meta(season).copy()
     if idx.empty:
-        return {
+        result = {
             "buckets": [],
             "values": [],
             "delta_values": [],
             "toi_sec": [],
         }
+        _LEAGUE_EMPIRICAL_CURVE_CACHE[cache_key] = result
+        return result
 
     if min_stint_sec > 0:
         idx = idx[idx["duration"] >= min_stint_sec]
     if idx.empty:
-        return {
+        result = {
             "buckets": [],
             "values": [],
             "delta_values": [],
             "toi_sec": [],
         }
+        _LEAGUE_EMPIRICAL_CURVE_CACHE[cache_key] = result
+        return result
 
     bucketed = _bucket_shift_age_overlap(idx, bucket_size=bucket_size)
     if bucketed.empty:
-        return {
+        result = {
             "buckets": [],
             "values": [],
             "delta_values": [],
             "toi_sec": [],
         }
+        _LEAGUE_EMPIRICAL_CURVE_CACHE[cache_key] = result
+        return result
 
     bucketed["xgd60"] = (bucketed["xg_for"] - bucketed["xg_against"]) / bucketed["toi_sec"] * 3600
     fresh = float(bucketed.iloc[0]["xgd60"])
     bucketed["delta_xgd60"] = bucketed["xgd60"] - fresh
 
-    return {
+    result = {
         "buckets": [int(v) for v in bucketed["shift_bucket"].tolist()],
         "values": [round(float(v), 3) for v in bucketed["xgd60"].tolist()],
         "delta_values": [round(float(v), 3) for v in bucketed["delta_xgd60"].tolist()],
         "toi_sec": [round(float(v), 1) for v in bucketed["toi_sec"].tolist()],
     }
+    _LEAGUE_EMPIRICAL_CURVE_CACHE[cache_key] = result
+    return result
 
 
 @app.get("/player/{player_id}/decay")
@@ -437,6 +544,8 @@ async def player_decay(player_id: int, season: str | None = None):
 ## per-season cache of the exploded 5v5 stint frame with original row metadata
 _STINT_META_CACHE: dict[str, "pd.DataFrame"] = {}
 _PLAYER_SHIFT_COUNTS_CACHE: dict[str, dict[int, dict[str, int]]] = {}
+_LEAGUE_EMPIRICAL_CURVE_CACHE: dict[tuple[str, int, int], dict] = {}
+_PLAYER_TEAM_MAP_CACHE: dict[str, dict[int, str]] = {}
 
 
 def _get_stint_meta(season: str) -> "pd.DataFrame":
@@ -452,7 +561,11 @@ def _get_stint_meta(season: str) -> "pd.DataFrame":
     ev.index.name = "stint_idx"
     ev = ev.reset_index()
 
-    keep = ["stint_idx", "game_id", "period", "start_sec", "duration",
+    for col, default in (("game_date", ""), ("home_team", "?"), ("away_team", "?")):
+        if col not in ev.columns:
+            ev[col] = default
+
+    keep = ["stint_idx", "game_id", "game_date", "home_team", "away_team", "period", "start_sec", "duration",
             "home_shift_age", "away_shift_age", "zone_start", "score_state",
             "xg_for", "xg_against", "corsi_for", "corsi_against",
             "home_skaters", "away_skaters"]
@@ -474,7 +587,7 @@ def _get_stint_meta(season: str) -> "pd.DataFrame":
     away["p_xgf"]     = away["xg_against"]  # flip so "for" = player's team
     away["p_xga"]     = away["xg_for"]
 
-    cols = ["stint_idx", "player_id", "is_home", "game_id", "period",
+    cols = ["stint_idx", "player_id", "is_home", "game_id", "game_date", "home_team", "away_team", "period",
             "start_sec", "duration", "shift_age", "zone_start", "score_state",
             "p_xgf", "p_xga"]
     combined = pd.concat([home[cols], away[cols]], ignore_index=True)
@@ -500,6 +613,34 @@ def _get_stint_meta(season: str) -> "pd.DataFrame":
 
     _STINT_META_CACHE[season] = combined
     return combined
+
+
+def _get_player_team_map(season: str) -> dict[int, str]:
+    if season in _PLAYER_TEAM_MAP_CACHE:
+        return _PLAYER_TEAM_MAP_CACHE[season]
+
+    meta = _get_stint_meta(season)
+    if meta.empty:
+        _PLAYER_TEAM_MAP_CACHE[season] = {}
+        return _PLAYER_TEAM_MAP_CACHE[season]
+
+    required_cols = {"home_team", "away_team", "is_home"}
+    if not required_cols.issubset(meta.columns):
+        _PLAYER_TEAM_MAP_CACHE[season] = {}
+        return _PLAYER_TEAM_MAP_CACHE[season]
+
+    team_series = meta["home_team"].where(meta["is_home"], meta["away_team"]).fillna("?")
+    counts = (
+        meta.assign(team_code=team_series)
+        .loc[lambda df: df["team_code"].notna() & (df["team_code"] != "?") & (df["team_code"] != "")]
+        .groupby(["player_id", "team_code"])
+        .size()
+        .reset_index(name="n")
+        .sort_values(["player_id", "n", "team_code"], ascending=[True, False, True])
+    )
+    team_map = counts.groupby("player_id", sort=False)["team_code"].first().to_dict() if not counts.empty else {}
+    _PLAYER_TEAM_MAP_CACHE[season] = {int(pid): str(team) for pid, team in team_map.items()}
+    return _PLAYER_TEAM_MAP_CACHE[season]
 
 
 def _get_player_shift_counts(season: str) -> dict[int, dict[str, int]]:
@@ -596,6 +737,25 @@ def _get_player_shift_summary(season: str, player_id: int) -> dict[str, int]:
     return {"max_shift_duration": max_shift_duration}
 
 
+def _format_game_label(game_id: int, game_date: str, home_team: str, away_team: str, is_home: bool | None) -> str:
+    date_part = game_date or ""
+    if is_home is True:
+        opponent = away_team if away_team and away_team != "?" else ""
+        if date_part and opponent:
+            return f"{date_part} vs {opponent}"
+        if opponent:
+            return f"vs {opponent}"
+    if is_home is False:
+        opponent = home_team if home_team and home_team != "?" else ""
+        if date_part and opponent:
+            return f"{date_part} @ {opponent}"
+        if opponent:
+            return f"@ {opponent}"
+    if date_part:
+        return date_part
+    return f"Game {game_id}"
+
+
 @app.get("/player/{player_id}/stints")
 async def player_stints(player_id: int, season: str | None = None):
     import numpy as np
@@ -643,6 +803,10 @@ async def player_stints(player_id: int, season: str | None = None):
             subset.groupby("shift_id", sort=False)
             .agg(
                 game_id   =("game_id",    "first"),
+                game_date =("game_date",  "first"),
+                home_team =("home_team",  "first"),
+                away_team =("away_team",  "first"),
+                is_home   =("is_home",    "first"),
                 period    =("period",     "first"),
                 start_sec =("start_sec",  "first"),
                 end_sec   =("end_sec",    "last"),
@@ -660,8 +824,17 @@ async def player_stints(player_id: int, season: str | None = None):
 
         records = []
         for _, r in agg.iterrows():
+            game_date = str(r.get("game_date", "") or "")
+            home_team = str(r.get("home_team", "?") or "?")
+            away_team = str(r.get("away_team", "?") or "?")
+            is_home_val = r.get("is_home")
+            is_home = None if is_home_val is None or is_home_val != is_home_val else bool(is_home_val)
             records.append({
                 "game_id":   int(r["game_id"]),
+                "game_date": game_date,
+                "home_team": home_team,
+                "away_team": away_team,
+                "game_label": _format_game_label(int(r["game_id"]), game_date, home_team, away_team, is_home),
                 "period":    int(r["period"]),
                 "start_sec": int(r["start_sec"]),
                 "duration":  int(r["duration"]),
@@ -677,12 +850,19 @@ async def player_stints(player_id: int, season: str | None = None):
         return JSONResponse({"stints": [], "total": 0, "error": str(exc)})
 
 
+@app.get("/app.bundle.js")
+async def app_bundle():
+    _ensure_app_bundle()
+    return FileResponse(APP_BUNDLE, media_type="application/javascript")
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(season: str | None = None):
     available = _available_seasons()
     if season is None:
         season = available[-1] if available else (cfg.seasons[-1] if cfg.seasons else "20232024")
 
+    _ensure_app_bundle()
     data      = _get_data(season)
     data_json = json.dumps(data, default=str)
     html      = TEMPLATE.replace("{{DATA_JSON}}", data_json)

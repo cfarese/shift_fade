@@ -33,6 +33,9 @@ _SHOT_EVENTS = {"shot-on-goal", "missed-shot", "blocked-shot", "goal"}
 @dataclass
 class Stint:
     game_id: int
+    game_date: str
+    home_team: str
+    away_team: str
     period: int
     start_sec: int
     end_sec: int
@@ -71,6 +74,14 @@ class PBPParser:
         self.shifts       = shifts
         self.home_team_id = raw.get("homeTeam", {}).get("id")
         self.away_team_id = raw.get("awayTeam", {}).get("id")
+        self.game_date    = (
+            raw.get("gameDate")
+            or str(raw.get("gameDateTime", ""))[:10]
+            or str(raw.get("startTimeUTC", ""))[:10]
+            or ""
+        )
+        self.home_team_abbrev = self._team_abbrev(raw.get("homeTeam", {}))
+        self.away_team_abbrev = self._team_abbrev(raw.get("awayTeam", {}))
 
         ## build goalie set from rosterSpots so we can exclude them
         self._goalie_ids: set[int] = {
@@ -84,6 +95,17 @@ class PBPParser:
             int(r["playerId"]): int(r["teamId"])
             for r in raw.get("rosterSpots", [])
         }
+
+    @staticmethod
+    def _team_abbrev(team: dict) -> str:
+        if not team:
+            return "?"
+        return (
+            team.get("abbrev")
+            or team.get("triCode")
+            or team.get("abbrevName", {}).get("default")
+            or str(team.get("placeName", {}).get("default", "?"))[:3].upper()
+        )
 
     def parse(self) -> list[Stint]:
         if not self.shifts:
@@ -167,6 +189,9 @@ class PBPParser:
 
             stints.append(Stint(
                 game_id=self.game_id,
+                game_date=self.game_date,
+                home_team=self.home_team_abbrev,
+                away_team=self.away_team_abbrev,
                 period=period,
                 start_sec=t_start,
                 end_sec=t_end,
@@ -241,6 +266,9 @@ def stints_to_dataframe(stints: list[Stint]) -> pd.DataFrame:
     for s in stints:
         rows.append({
             "game_id":        s.game_id,
+            "game_date":      s.game_date,
+            "home_team":      s.home_team,
+            "away_team":      s.away_team,
             "period":         s.period,
             "start_sec":      s.start_sec,
             "end_sec":        s.end_sec,

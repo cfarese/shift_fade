@@ -107,6 +107,108 @@ def get_top_lines(season: str, n: int = 20, min_toi_min: float = 5.0) -> pd.Data
     return stats.head(n)
 
 
+def get_forward_line_stats(
+    season: str,
+    pos_map: dict[int, str],
+    min_toi_sec: int = 1200,
+) -> pd.DataFrame:
+    ## groups by the 3 non-D home skaters; stints where home has != 3 forwards are dropped
+
+    df = load_stints(season)
+    ev = df[df["strength"] == "5v5"].copy()
+
+    def fwd_trio(skaters) -> tuple[int, ...] | None:
+        fwds = tuple(sorted(int(p) for p in skaters if pos_map.get(int(p), "F") != "D"))
+        return fwds if len(fwds) == 3 else None
+
+    ev["fwd_line"] = ev["home_skaters"].apply(fwd_trio)
+    ev = ev[ev["fwd_line"].notna()].copy()
+
+    if ev.empty:
+        return pd.DataFrame()
+
+    grouped = (
+        ev.groupby("fwd_line")
+        .agg(
+            toi_sec=("duration", "sum"),
+            xg_for=("xg_for", "sum"),
+            xg_against=("xg_against", "sum"),
+            corsi_for=("corsi_for", "sum"),
+            corsi_against=("corsi_against", "sum"),
+            n_stints=("duration", "count"),
+            avg_shift_age=("home_shift_age", "mean"),
+        )
+        .reset_index()
+    )
+
+    grouped = grouped[grouped["toi_sec"] >= min_toi_sec].copy()
+    grouped["toi_min"] = grouped["toi_sec"] / 60
+    total_xg = (grouped["xg_for"] + grouped["xg_against"]).replace(0, np.nan)
+    grouped["xgf_pct"] = grouped["xg_for"] / total_xg
+    grouped["xg_diff_per60"] = (grouped["xg_for"] - grouped["xg_against"]) / grouped["toi_sec"] * 3600
+    total_cf = (grouped["corsi_for"] + grouped["corsi_against"]).replace(0, np.nan)
+    grouped["cf_pct"] = grouped["corsi_for"] / total_cf
+
+    return grouped.sort_values("xg_diff_per60", ascending=False)
+
+
+def get_forward_line_overuse(
+    season: str,
+    pos_map: dict[int, str],
+    min_toi_min: float = 20.0,
+) -> pd.DataFrame:
+    stats = get_forward_line_stats(season, pos_map, min_toi_sec=int(min_toi_min * 60))
+    if stats.empty:
+        return pd.DataFrame()
+
+    df = load_stints(season)
+    ev = df[df["strength"] == "5v5"].copy()
+
+    def fwd_trio(skaters) -> tuple[int, ...] | None:
+        fwds = tuple(sorted(int(p) for p in skaters if pos_map.get(int(p), "F") != "D"))
+        return fwds if len(fwds) == 3 else None
+
+    ev["fwd_line"] = ev["home_skaters"].apply(fwd_trio)
+    ev = ev[ev["fwd_line"].notna()].copy()
+
+    valid = set(stats["fwd_line"].tolist())
+    ev = ev[ev["fwd_line"].isin(valid)]
+
+    early_ev = ev[ev["home_shift_age"] <= 30]
+    late_ev  = ev[ev["home_shift_age"] > 45]
+
+    early = early_ev.groupby("fwd_line").agg(
+        early_toi=("duration", "sum"),
+        early_xgf=("xg_for", "sum"),
+        early_xga=("xg_against", "sum"),
+    )
+    late = late_ev.groupby("fwd_line").agg(
+        late_toi=("duration", "sum"),
+        late_xgf=("xg_for", "sum"),
+        late_xga=("xg_against", "sum"),
+    )
+
+    merged = (
+        stats.set_index("fwd_line")
+        .join(early, how="left")
+        .join(late, how="left")
+        .reset_index()
+        .dropna(subset=["early_toi", "late_toi"])
+    )
+    merged = merged[(merged["early_toi"] >= 30) & (merged["late_toi"] >= 30)]
+
+    if merged.empty:
+        return pd.DataFrame()
+
+    merged["early_xgd60"] = (merged["early_xgf"] - merged["early_xga"]) / merged["early_toi"] * 3600
+    merged["late_xgd60"]  = (merged["late_xgf"]  - merged["late_xga"])  / merged["late_toi"]  * 3600
+    merged["decay_delta"] = merged["late_xgd60"] - merged["early_xgd60"]
+    merged["overuse_flag"] = merged["late_xgd60"] < merged["early_xgd60"] - 1.0
+
+    cols = ["fwd_line", "toi_min", "xg_diff_per60", "early_xgd60", "late_xgd60", "decay_delta", "overuse_flag"]
+    return merged[cols].sort_values("decay_delta").reset_index(drop=True)
+
+
 def get_overused_lines(season: str, min_toi_min: float = 5.0) -> pd.DataFrame:
     ## compares early (0-30s) vs late (>45s) xGD/60 for each line combination
     ## uses vectorized groupby instead of per-combo scans -- O(n_stints) not O(n_combos*n_stints)
