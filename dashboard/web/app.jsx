@@ -309,7 +309,7 @@ const TopNav = ({page,setPage,season,onSeasonChange,breadcrumb}) => (
   <div style={{background:'#fff',borderBottom:'1px solid #e5e5e5',position:'sticky',top:0,zIndex:100}}>
     <div style={{maxWidth:1200,margin:'0 auto',padding:'0 24px',display:'flex',alignItems:'center',gap:0,height:52}}>
       <div style={{fontWeight:700,fontSize:14,letterSpacing:'-0.01em',marginRight:32,color:'#111',whiteSpace:'nowrap'}}>
-        <span style={{color:'#1d4ed8'}}>⬡</span> Shift Fade xGD/60
+        <span style={{color:'#1d4ed8'}}>⬡</span> Shift Fade
       </div>
       {NAV_PAGES.map(p=>(
         <button key={p} onClick={()=>setPage(p)} style={{
@@ -384,10 +384,14 @@ const PlayerShiftTrendChart = ({
   const rawMax = allY.length ? Math.max(...allY) : 1;
   const span = Math.max(rawMax - rawMin, 1.5);
   const pad = span * 0.22;
-  const yMin = Math.floor((rawMin - pad) * 2) / 2;
-  const yMax = Math.ceil((rawMax + pad) * 2) / 2;
+  const targetTickCount = 7;
+  const roughStep = (span + pad * 2) / targetTickCount;
+  const tickSteps = [0.5, 1, 2, 2.5, 5];
+  const tickStep = tickSteps.find(step => roughStep <= step) || 5;
+  const yMin = Math.floor((rawMin - pad) / tickStep) * tickStep;
+  const yMax = Math.ceil((rawMax + pad) / tickStep) * tickStep;
   const yTicks = [];
-  for (let v = yMin; v <= yMax + 0.001; v += 0.5) yTicks.push(Number(v.toFixed(1)));
+  for (let v = yMin; v <= yMax + 0.001; v += tickStep) yTicks.push(Number(v.toFixed(2)));
 
   const maxToi = Math.max(...displayPts.map(d => d.toi), 1);
   const slotW = count > 1 ? W / (count - 1) : W;
@@ -410,7 +414,7 @@ const PlayerShiftTrendChart = ({
             <g key={v}>
               <line x1={0} y1={yS(v)} x2={W} y2={yS(v)} stroke={v === 0 ? '#d1d5db' : '#f1f5f9'} strokeWidth={v === 0 ? 1.5 : 1}/>
               <text x={-8} y={yS(v)+4} textAnchor="end" fontSize="11" fill={v === 0 ? '#64748b' : '#94a3b8'} fontFamily="IBM Plex Mono">
-                {v > 0 ? `+${v.toFixed(1)}` : v.toFixed(1)}
+                {v > 0 ? `+${Number(v.toFixed(2)).toString()}` : Number(v.toFixed(2)).toString()}
               </text>
             </g>
           ))}
@@ -1469,6 +1473,8 @@ const LinesPage = ({openPlayer}) => {
 const TeamReportPage = ({selectedTeam, onTeamChange, openPlayer}) => {
   const team = selectedTeam || (TEAMS[0] || '');
   const [tip, setTip] = useState(null);
+  const [sortKey, setSortKey] = useState('toi_min');
+  const [sortDir, setSortDir] = useState('desc');
   const roster = CHARTED.filter(p=>p.team===team).sort((a,b)=>b.toi_min-a.toi_min);
   const flags = roster.filter(p=>p.flagged).length;
   const avgDurabilityValue = roster.length ? roster.reduce((s,p)=>s+p.drop,0)/roster.length : 0;
@@ -1495,11 +1501,32 @@ const TeamReportPage = ({selectedTeam, onTeamChange, openPlayer}) => {
   const syS=v=>sH-((v-yMin)/(yMax-yMin))*sH;
   // quadrant labels
   const quadrants = [
-    {x:sW-10,y:16,   label:'Elite and Durable',color:'#15803d',anchor:'end'},
-    {x:10,y:16,      label:'Elite but Fades',  color:'#b45309',anchor:'start'},
-    {x:sW-10,y:sH-10,label:'Safe but Low Output', color:'#6b7280',anchor:'end'},
-    {x:10,y:sH-10,   label:'Avoid',             color:'#dc2626',anchor:'start'},
+    {x:sW-12,y:18,   label:'Elite and Durable',color:'#15803d',anchor:'end', bg:'rgba(255,255,255,0.94)'},
+    {x:12,y:18,      label:'Elite but Fades',  color:'#b45309',anchor:'start', bg:'rgba(255,255,255,0.94)'},
+    {x:sW-12,y:sH-12,label:'Safe but Low Output', color:'#6b7280',anchor:'end', bg:'rgba(255,255,255,0.94)'},
+    {x:12,y:sH-12,   label:'Avoid',             color:'#dc2626',anchor:'start', bg:'rgba(255,255,255,0.94)'},
   ];
+
+  const onSort = (key) => {
+    if (sortKey === key) {
+      setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortKey(key);
+      setSortDir(key === 'name' || key === 'pos' ? 'asc' : 'desc');
+    }
+  };
+
+  const sortedRoster = [...roster].sort((a, b) => {
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const av = a[sortKey];
+    const bv = b[sortKey];
+    if (typeof av === 'string' || typeof bv === 'string') {
+      return String(av).localeCompare(String(bv)) * dir;
+    }
+    return ((Number(av) || 0) - (Number(bv) || 0)) * dir;
+  });
+
+  const sortArrow = (key) => sortKey === key ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '';
 
   const handleScatterMove = (e, p) => {
     const rect = e.currentTarget.closest('svg').getBoundingClientRect();
@@ -1564,6 +1591,10 @@ const TeamReportPage = ({selectedTeam, onTeamChange, openPlayer}) => {
             <span><b style={{color:'#1d4ed8'}}>X →</b> Durability (right = above league average)</span>
             <span><b style={{color:'#1d4ed8'}}>Y ↑</b> Overall xGD/60 (up = above league average)</span>
           </div>
+          <div style={{fontSize:10,color:'#94a3b8',fontFamily:'IBM Plex Mono',marginBottom:8,display:'flex',gap:16,flexWrap:'wrap'}}>
+            <span>league avg {qualityThreshold.toFixed(2)}</span>
+            <span>league dur {durabilityThreshold.toFixed(2)}</span>
+          </div>
           <div style={{position:'relative',display:'inline-block'}}>
             <svg width={scW} height={scH} style={{cursor:'crosshair'}} onMouseLeave={()=>setTip(null)}>
               <g transform={`translate(${sm.left},${sm.top})`}>
@@ -1577,8 +1608,18 @@ const TeamReportPage = ({selectedTeam, onTeamChange, openPlayer}) => {
                 <line x1={sxS(durabilityThreshold)} y1={0} x2={sxS(durabilityThreshold)} y2={sH} stroke="#94a3b8" strokeWidth="1.2" strokeDasharray="6 4"/>
                 {/* quadrant labels */}
                 {quadrants.map(q=>(
-                  <text key={q.label} x={q.x} y={q.y} fontSize="9" fill={q.color} opacity="0.7"
-                    fontFamily="IBM Plex Sans, sans-serif" fontWeight="600" textAnchor={q.anchor}>{q.label}</text>
+                  <g key={q.label}>
+                    <rect
+                      x={q.anchor === 'end' ? q.x - 118 : q.x - 4}
+                      y={q.y - 11}
+                      width={122}
+                      height={16}
+                      rx={4}
+                      fill={q.bg}
+                    />
+                    <text x={q.x} y={q.y} fontSize="9" fill={q.color} opacity="0.85"
+                      fontFamily="IBM Plex Sans, sans-serif" fontWeight="600" textAnchor={q.anchor}>{q.label}</text>
+                  </g>
                 ))}
                 {/* dots */}
                 {roster.map(p=>(
@@ -1600,14 +1641,6 @@ const TeamReportPage = ({selectedTeam, onTeamChange, openPlayer}) => {
                 {[yMin+(yMax-yMin)*0.25, qualityThreshold, yMin+(yMax-yMin)*0.75].map((v,i)=>(
                   <text key={i} x={-6} y={syS(v)+4} textAnchor="end" fontSize="9" fill="#bbb" fontFamily="IBM Plex Mono">{v.toFixed(3)}</text>
                 ))}
-                <rect x={6} y={syS(qualityThreshold)-18} width={110} height={16} rx={4} fill="rgba(255,255,255,0.92)"/>
-                <text x={12} y={syS(qualityThreshold)-6} fontSize="9" fill="#94a3b8" fontFamily="IBM Plex Mono">
-                  league avg {qualityThreshold.toFixed(2)}
-                </text>
-                <rect x={sxS(durabilityThreshold)+6} y={6} width={112} height={16} rx={4} fill="rgba(255,255,255,0.92)"/>
-                <text x={sxS(durabilityThreshold)+12} y={18} fontSize="9" fill="#94a3b8" fontFamily="IBM Plex Mono">
-                  league dur {durabilityThreshold.toFixed(2)}
-                </text>
               </g>
             </svg>
             {tip && (
@@ -1652,9 +1685,17 @@ const TeamReportPage = ({selectedTeam, onTeamChange, openPlayer}) => {
         <SectionHeader title="Roster Breakdown" sub="Click a player name to open their full profile."/>
         <table>
           <thead><tr>
-            <th style={{textAlign:'left'}}>Player</th><th>Pos</th><th>Overall xGD</th><th>Durability</th><th>Early xGD</th><th>Late xGD</th><th>TOI (min)</th><th>Shifts</th><th>Flagged</th>
+            <th style={{textAlign:'left'}}><button onClick={()=>onSort('name')} style={{fontSize:12,fontWeight:600,color:'#666'}}>Player{sortArrow('name')}</button></th>
+            <th><button onClick={()=>onSort('pos')} style={{fontSize:12,fontWeight:600,color:'#666'}}>Pos{sortArrow('pos')}</button></th>
+            <th><button onClick={()=>onSort('overall_xgd')} style={{fontSize:12,fontWeight:600,color:'#666'}}>Overall xGD{sortArrow('overall_xgd')}</button></th>
+            <th><button onClick={()=>onSort('drop')} style={{fontSize:12,fontWeight:600,color:'#666'}}>Durability{sortArrow('drop')}</button></th>
+            <th><button onClick={()=>onSort('early')} style={{fontSize:12,fontWeight:600,color:'#666'}}>Early xGD{sortArrow('early')}</button></th>
+            <th><button onClick={()=>onSort('late')} style={{fontSize:12,fontWeight:600,color:'#666'}}>Late xGD{sortArrow('late')}</button></th>
+            <th><button onClick={()=>onSort('toi_min')} style={{fontSize:12,fontWeight:600,color:'#666'}}>TOI (min){sortArrow('toi_min')}</button></th>
+            <th><button onClick={()=>onSort('stints')} style={{fontSize:12,fontWeight:600,color:'#666'}}>Shifts{sortArrow('stints')}</button></th>
+            <th><button onClick={()=>onSort('flagged')} style={{fontSize:12,fontWeight:600,color:'#666'}}>Flagged{sortArrow('flagged')}</button></th>
           </tr></thead>
-          <tbody>{roster.map(p=>(
+          <tbody>{sortedRoster.map(p=>(
             <tr key={p.id}>
               <td><button onClick={()=>openPlayer(p)} style={{color:'#1d4ed8',fontWeight:600,fontSize:13}}>{p.name}</button></td>
               <td style={{textAlign:'center',color:'#888',fontSize:12}}>{p.pos}</td>

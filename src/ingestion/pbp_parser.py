@@ -25,6 +25,7 @@ _XG_BY_TYPE: dict[str, float] = {
     "shot-on-goal": 0.075,
     "missed-shot":  0.025,
     "blocked-shot": 0.015,
+    "goal":         0.075,
 }
 
 _SHOT_EVENTS = {"shot-on-goal", "missed-shot", "blocked-shot", "goal"}
