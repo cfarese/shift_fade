@@ -20,6 +20,8 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from src.models.xg_model import extract_shots_from_raw, get_default_xg_model, score_shots
+
 
 _XG_BY_TYPE: dict[str, float] = {
     "shot-on-goal": 0.075,
@@ -213,6 +215,22 @@ class PBPParser:
 
         plays      = self.raw.get("plays", [])
         score_diff = 0
+        xg_by_event: dict[int, float] = {}
+        model_loaded = False
+
+        model = get_default_xg_model()
+        if model is not None:
+            try:
+                shot_df = extract_shots_from_raw(self.raw, game_id=self.game_id)
+                if not shot_df.empty:
+                    scored = score_shots(shot_df, model)
+                    xg_by_event = {
+                        int(event_id): float(xg)
+                        for event_id, xg in zip(scored["event_id"].tolist(), scored["xg"].tolist(), strict=False)
+                    }
+                model_loaded = True
+            except Exception as exc:
+                logger.warning(f"Game {self.game_id}: trained xG scoring failed, using fixed weights ({exc})")
 
         for play in plays:
             event_type = play.get("typeDescKey", "")
@@ -235,7 +253,14 @@ class PBPParser:
                 s          = stints[idx]
                 owner_team = details.get("eventOwnerTeamId")
                 is_home    = owner_team == self.home_team_id
-                xg         = _XG_BY_TYPE.get(event_type, 0.0)
+                event_id   = int(play.get("eventId") or play.get("sortOrder") or 0)
+                if model_loaded and event_id in xg_by_event:
+                    xg = xg_by_event[event_id]
+                elif model_loaded and event_type == "blocked-shot":
+                    ## Trained model is Fenwick-style, so blocked attempts carry no xG.
+                    xg = 0.0
+                else:
+                    xg = _XG_BY_TYPE.get(event_type, 0.0)
 
                 if is_home:
                     s.corsi_for  += 1

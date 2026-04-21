@@ -629,17 +629,28 @@ const OverviewPage = ({openPlayer}) => {
         <div style={{fontSize:12,fontWeight:700,color:'#1d4ed8',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:10}}>Start Here</div>
         <div style={{display:'grid',gridTemplateColumns:'1.2fr 1fr 1.3fr',gap:18,fontSize:12,color:'#374151',lineHeight:1.7}}>
           <div>
-            <span style={{fontWeight:700,color:'#111'}}>What xGD/60 means:</span> It is a simple way to estimate whether a player's team is getting the better scoring chances while he is on the ice at 5v5.
-            Above zero is good. Below zero is bad.
+            <span style={{fontWeight:700,color:'#111'}}>What xGD/60 means:</span> Expected Goal Differential per 60 minutes. It measures the cumulative shot quality your team generated minus shot quality allowed while a player was on ice at 5v5, scaled to a full hour. Positive = team has better scoring chances; negative = team is being out-chanced.
           </div>
           <div>
-            <span style={{fontWeight:700,color:'#111'}}>What durability means:</span> We compare a player's early-shift results to his late-shift results.
+            <span style={{fontWeight:700,color:'#111'}}>What durability means:</span> I compare a player's early-shift results to his late-shift results.
             If the number is very negative, he fades as the shift gets older. If it is near zero or positive, he holds up well.
           </div>
           <div>
-            <span style={{fontWeight:700,color:'#111'}}>How we calculate it:</span> We add up expected goals for and against during tracked 5v5 shift segments, subtract against from for, divide by ice time, and scale to 60 minutes.
+            <span style={{fontWeight:700,color:'#111'}}>How I calculate it:</span> I add up expected goals for and against during tracked 5v5 shift segments, subtract against from for, divide by ice time, and scale to 60 minutes.
             Early, middle, and late numbers use that same calculation inside different parts of the shift.
           </div>
+        </div>
+        <div style={{marginTop:14,paddingTop:14,borderTop:'1px solid #e0e7ff',fontSize:12,color:'#374151',lineHeight:1.8}}>
+          <span style={{fontWeight:700,color:'#111'}}>How I built the xG model:</span> I built a Fenwick-adjusted expected goals model using unblocked shot attempts (shot-on-goal, missed, goal). The baseline is a location-grid (10ft × 5ft zones), adjusted multiplicatively by shot type, score state, rebound flag, rush flag, season, and home-rink effects. The approach was inspired by{' '}
+          <a
+            href="https://hockey-statistics.com/2022/08/14/building-an-xg-model-v-1-0/"
+            target="_blank"
+            rel="noreferrer"
+            style={{color:'#1d4ed8',fontWeight:600}}
+          >
+            hockey-statistics.com&apos;s grid-based xG walkthrough
+          </a>
+          , then trained on full-season NHL play-by-play data with iterative calibration and final strength-state scaling.
         </div>
       </div>
 
@@ -727,6 +738,25 @@ const OverviewPage = ({openPlayer}) => {
               </tr>
             ))}</tbody>
           </table>
+        </div>
+      </div>
+
+      <div style={{marginTop:24,background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px 24px'}}>
+        <SectionHeader title="Who made this?" />
+        <div style={{fontSize:12,color:'#4b5563',lineHeight:1.8,maxWidth:980}}>
+          Hi, I'm Christian. I love sports analytics. I'm doing a double major in Math and Computer Science at the University of Florida.
+          I work at the UF Sports Analytics Lab and UF Nelms-IoT lab. You can contact me at{' '}
+          <a href="mailto:christian@farese.net" style={{color:'#1d4ed8',fontWeight:600}}>christian@farese.net</a>.
+          {' '}My LinkedIn is{' '}
+          <a
+            href="https://linkedin.com/in/christianfarese"
+            target="_blank"
+            rel="noreferrer"
+            style={{color:'#1d4ed8',fontWeight:600}}
+          >
+            linkedin.com/in/christianfarese
+          </a>.
+          {' '}Looking for internships in Summer of 2026 and beyond. If this project impressed you and you know somebody who might be interested in my services, please pass it on. Thank you for visiting my website.
         </div>
       </div>
     </div>
@@ -1129,7 +1159,7 @@ const PlayerProfile = ({player, setPage}) => {
       <div style={{display:'grid',gridTemplateColumns:'1fr 210px',gap:16,marginBottom:16}}>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
           <SectionHeader
-            title={<span>Observed Shift Fade <InfoTooltip text="This chart uses tracked 5v5 on-ice stint data, split into 10-second shift-age buckets. We calculate xGD/60 separately for each bucket, then rebase the chart so the player's 0-10s bucket equals zero. That means every later point shows how much better or worse the player performed relative to his own fresh-shift baseline, not whether he was good in absolute terms. The teal dashed line is the league-average change over the same buckets. Blue bars show how much player ice time exists in each bucket, so very small bars mean the late-shift points are less trustworthy." /></span>}
+            title={<span>Observed Shift Fade <InfoTooltip text="This chart uses tracked 5v5 on-ice stint data, split into 10-second shift-age buckets. I calculate xGD/60 separately for each bucket, then rebase the chart so the player's 0-10s bucket equals zero. That means every later point shows how much better or worse the player performed relative to his own fresh-shift baseline, not whether he was good in absolute terms. The teal dashed line is the league-average change over the same buckets. Blue bars show how much player ice time exists in each bucket, so very small bars mean the late-shift points are less trustworthy." /></span>}
             sub="How hard does this player fall off the cliff as his shift gets longer? The blue line shows change from his own fresh-shift level, so downward movement means a real drop-off. Teal dashed = league-average drop-off. Blue bars = sample size."/>
           {empData === null
             ? <div style={{height:280,display:'flex',alignItems:'center',justifyContent:'center',color:'#bbb',fontSize:13}}>Loading…</div>
@@ -1397,7 +1427,7 @@ const LinesPage = ({openPlayer}) => {
       <div style={{marginBottom:24}}>
         <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:6}}>Line Combination Analysis</h1>
         <p style={{fontSize:13,color:'#777',maxWidth:680,lineHeight:1.6}}>
-          Each row is one 3-forward line at 5v5, independent of which defense pair was behind it. We compare that trio's results in the
+          Each row is one 3-forward line at 5v5, independent of which defense pair was behind it. I compare that trio's results in the
           first 30 seconds of a shift with its results after 45 seconds, so you can see which forward lines hold up and which ones fade late.
         </p>
       </div>
@@ -1731,6 +1761,12 @@ const App = () => {
   useEffect(() => {
     window.history.replaceState(route, '', buildRouteUrl(route));
   }, []);
+
+  useEffect(() => {
+    if (route.page === 'profile' && route.playerId) {
+      window.scrollTo({top: 0, left: 0, behavior: 'auto'});
+    }
+  }, [route.page, route.playerId]);
 
   const commitRoute = (nextRoute, {replace=false, reload=false} = {}) => {
     const normalized = normalizeRouteState(nextRoute);
