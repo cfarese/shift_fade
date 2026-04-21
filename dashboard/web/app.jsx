@@ -309,7 +309,7 @@ const TopNav = ({page,setPage,season,onSeasonChange,breadcrumb}) => (
   <div style={{background:'#fff',borderBottom:'1px solid #e5e5e5',position:'sticky',top:0,zIndex:100}}>
     <div style={{maxWidth:1200,margin:'0 auto',padding:'0 24px',display:'flex',alignItems:'center',gap:0,height:52}}>
       <div style={{fontWeight:700,fontSize:14,letterSpacing:'-0.01em',marginRight:32,color:'#111',whiteSpace:'nowrap'}}>
-        <span style={{color:'#1d4ed8'}}>⬡</span> Shift Decay xGD/60
+        <span style={{color:'#1d4ed8'}}>⬡</span> Shift Fade xGD/60
       </div>
       {NAV_PAGES.map(p=>(
         <button key={p} onClick={()=>setPage(p)} style={{
@@ -1125,7 +1125,7 @@ const PlayerProfile = ({player, setPage}) => {
       <div style={{display:'grid',gridTemplateColumns:'1fr 210px',gap:16,marginBottom:16}}>
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
           <SectionHeader
-            title={<span>Observed Shift Decay <InfoTooltip text="This chart uses tracked 5v5 on-ice stint data, split into 10-second shift-age buckets. We calculate xGD/60 separately for each bucket, then rebase the chart so the player's 0-10s bucket equals zero. That means every later point shows how much better or worse the player performed relative to his own fresh-shift baseline, not whether he was good in absolute terms. The teal dashed line is the league-average change over the same buckets. Blue bars show how much player ice time exists in each bucket, so very small bars mean the late-shift points are less trustworthy." /></span>}
+            title={<span>Observed Shift Fade <InfoTooltip text="This chart uses tracked 5v5 on-ice stint data, split into 10-second shift-age buckets. We calculate xGD/60 separately for each bucket, then rebase the chart so the player's 0-10s bucket equals zero. That means every later point shows how much better or worse the player performed relative to his own fresh-shift baseline, not whether he was good in absolute terms. The teal dashed line is the league-average change over the same buckets. Blue bars show how much player ice time exists in each bucket, so very small bars mean the late-shift points are less trustworthy." /></span>}
             sub="How hard does this player fall off the cliff as his shift gets longer? The blue line shows change from his own fresh-shift level, so downward movement means a real drop-off. Teal dashed = league-average drop-off. Blue bars = sample size."/>
           {empData === null
             ? <div style={{height:280,display:'flex',alignItems:'center',justifyContent:'center',color:'#bbb',fontSize:13}}>Loading…</div>
@@ -1393,8 +1393,8 @@ const LinesPage = ({openPlayer}) => {
       <div style={{marginBottom:24}}>
         <h1 style={{fontSize:26,fontWeight:700,letterSpacing:'-0.02em',marginBottom:6}}>Line Combination Analysis</h1>
         <p style={{fontSize:13,color:'#777',maxWidth:680,lineHeight:1.6}}>
-          Each unit is a 5v5 forward line. The arrow compares that line's results early in a shift versus late in a shift,
-          so this page is really asking one question: which lines keep working, and which lines fade badly as the shift drags on?
+          Each row is one 3-forward line at 5v5, independent of which defense pair was behind it. We compare that trio's results in the
+          first 30 seconds of a shift with its results after 45 seconds, so you can see which forward lines hold up and which ones fade late.
         </p>
       </div>
 
@@ -1625,7 +1625,7 @@ const TeamReportPage = ({selectedTeam, onTeamChange, openPlayer}) => {
 
         {/* Deployment guide */}
         <div style={{background:'#fff',border:'1px solid #e8e8e8',borderRadius:6,padding:'20px'}}>
-          <SectionHeader title="Deployment Guide" sub="Players grouped by shift-decay quadrant. Click any name to open profile."/>
+          <SectionHeader title="Deployment Guide" sub="Players grouped by shift-fade quadrant. Click any name to open profile."/>
           <div style={{marginTop:8,display:'flex',flexDirection:'column',gap:12,maxHeight:320,overflowY:'auto'}}>
             {deployGroups.map(g=>(
               <div key={g.label} style={{background:g.bg,borderRadius:6,padding:'10px 12px',border:`1px solid ${g.color}22`}}>
