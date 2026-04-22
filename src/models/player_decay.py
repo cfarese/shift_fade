@@ -16,6 +16,7 @@ from src.models.line_analysis import load_stints
 ## module-level cache keyed by season -- avoids rebuilding the exploded
 ## index on every dashboard interaction (lru_cache doesn't work on DataFrames)
 _INDEX_CACHE: dict[str, pd.DataFrame] = {}
+_INDEX_CACHE_MAX = 1
 
 
 def _get_player_index(season: str) -> pd.DataFrame:
@@ -24,6 +25,11 @@ def _get_player_index(season: str) -> pd.DataFrame:
 
     if season in _INDEX_CACHE:
         return _INDEX_CACHE[season]
+
+    ## evict oldest season to cap memory at one player index (~200MB)
+    if len(_INDEX_CACHE) >= _INDEX_CACHE_MAX:
+        evict = next(iter(_INDEX_CACHE))
+        del _INDEX_CACHE[evict]
 
     df   = load_stints(season)
     ev   = df[df["strength"] == "5v5"].reset_index(drop=True)
@@ -45,6 +51,9 @@ def _get_player_index(season: str) -> pd.DataFrame:
     cols   = ["player_id", "duration", "p_xg_for", "p_xg_against", "shift_age"]
     result = pd.concat([home[cols], away[cols]], ignore_index=True)
     result["player_id"] = result["player_id"].astype(int)
+    del home, away, ev, df
+
+    import gc; gc.collect()
 
     _INDEX_CACHE[season] = result
     logger.debug(f"Built player index for {season}: {len(result)} player-stint rows")

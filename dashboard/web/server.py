@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from loguru import logger
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from fastapi import FastAPI
@@ -340,8 +342,9 @@ def _build_lines(season: str) -> list[dict]:
     return lines
 
 
-# cache per season so repeated loads are instant
+# cache per season -- keep only 1 to avoid holding 3x ~500KB dicts + deserialization overhead
 _CACHE: dict[str, dict] = {}
+_CACHE_MAX = 1
 
 
 def _web_payload_cache_path(season: str) -> Path:
@@ -356,9 +359,6 @@ def _web_payload_cache_is_fresh(season: str, cache_path: Path) -> bool:
     deps = [
         cfg.paths.processed / f"stints_{season}.parquet",
         cfg.paths.cache / "player_names.json",
-        Path(__file__),
-        WEB_DIR / "template.html",
-        APP_SOURCE,
     ]
     for dep in deps:
         if dep.exists() and dep.stat().st_mtime > cache_mtime:
@@ -386,6 +386,8 @@ def _save_cached_web_payload(season: str, data: dict) -> None:
 
 def _get_data(season: str) -> dict:
     if season not in _CACHE:
+        if len(_CACHE) >= _CACHE_MAX:
+            del _CACHE[next(iter(_CACHE))]
         cached = _load_cached_web_payload(season)
         if cached is not None:
             _CACHE[season] = cached
@@ -505,6 +507,10 @@ async def player_decay(player_id: int, season: str | None = None):
     if season is None:
         season = available[-1] if available else (cfg.seasons[-1] if cfg.seasons else "20232024")
     try:
+        disk = _load_player_decay_disk(season)
+        if player_id in disk:
+            return JSONResponse(disk[player_id])
+
         idx = _get_stint_meta(season)
         df = idx[idx["player_id"] == player_id].copy()
         if not df.empty:
@@ -541,11 +547,184 @@ async def player_decay(player_id: int, season: str | None = None):
         return JSONResponse({"buckets": [], "values": [], "se": [], "error": str(exc)})
 
 
-## per-season cache of the exploded 5v5 stint frame with original row metadata
+## per-season cache of the exploded 5v5 stint frame -- maxsize=1 to cap memory
 _STINT_META_CACHE: dict[str, "pd.DataFrame"] = {}
+_STINT_META_CACHE_MAX = 1
 _PLAYER_SHIFT_COUNTS_CACHE: dict[str, dict[int, dict[str, int]]] = {}
 _LEAGUE_EMPIRICAL_CURVE_CACHE: dict[tuple[str, int, int], dict] = {}
 _PLAYER_TEAM_MAP_CACHE: dict[str, dict[int, str]] = {}
+
+## disk-backed pre-computed player decay responses {season: {player_id: response_dict}}
+_PLAYER_DECAY_DISK: dict[str, dict[int, dict]] = {}
+
+
+def _player_decay_disk_path(season: str) -> Path:
+    return cfg.paths.cache / f"player_decay_{season}.json"
+
+
+def _load_player_decay_disk(season: str) -> dict[int, dict]:
+    if season in _PLAYER_DECAY_DISK:
+        return _PLAYER_DECAY_DISK[season]
+    path = _player_decay_disk_path(season)
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text())
+            _PLAYER_DECAY_DISK[season] = {int(k): v for k, v in raw.items()}
+            return _PLAYER_DECAY_DISK[season]
+        except Exception:
+            pass
+    return {}
+
+
+def precompute_player_decay_all(season: str) -> None:
+    import gc
+    league_curve = _get_league_empirical_curve(season)
+    meta = _get_stint_meta(season)
+    all_pids = meta["player_id"].unique().tolist()
+    out: dict[str, dict] = {}
+    for pid in all_pids:
+        df = meta[meta["player_id"] == pid].copy()
+        df = df[df["duration"] >= 10]
+        max_shift_duration = 0
+        if not df.empty:
+            df["end_sec"] = df["start_sec"] + df["duration"]
+            prev_end = df["end_sec"].shift(1)
+            is_new = (df["game_id"] != df["game_id"].shift(1)) | (df["period"] != df["period"].shift(1)) | ((df["start_sec"] - prev_end) > SHIFT_GAP_TOLERANCE)
+            is_new.iloc[0] = True
+            df = df.copy()
+            df["shift_id"] = is_new.cumsum().astype(int)
+            shifts = df.groupby("shift_id").agg(s=("start_sec","first"), e=("end_sec","last")).reset_index()
+            max_shift_duration = int((shifts["e"] - shifts["s"]).max())
+        bucketed = _bucket_shift_age_overlap(df, bucket_size=10)
+        if not bucketed.empty:
+            bucketed = bucketed[(bucketed["toi_sec"] >= 60) & (bucketed["n_segments"] >= 3)].copy()
+        if bucketed.empty:
+            out[str(pid)] = {"buckets": [], "values": [], "delta_values": [], "toi_sec": [], "stints": [], "league": league_curve, "max_age": 80, "max_shift_duration": max_shift_duration}
+        else:
+            bucketed["xgd60"] = (bucketed["xg_for"] - bucketed["xg_against"]) / bucketed["toi_sec"] * 3600
+            fresh = float(bucketed.iloc[0]["xgd60"])
+            bucketed["delta_xgd60"] = bucketed["xgd60"] - fresh
+            out[str(pid)] = {
+                "buckets":      [int(v) for v in bucketed["shift_bucket"].tolist()],
+                "values":       [round(float(v), 3) for v in bucketed["xgd60"].tolist()],
+                "delta_values": [round(float(v), 3) for v in bucketed["delta_xgd60"].tolist()],
+                "toi_sec":      [round(float(v), 1) for v in bucketed["toi_sec"].tolist()],
+                "stints":       [int(v) for v in bucketed["n_segments"].tolist()],
+                "league":       league_curve,
+                "max_age":      int(bucketed["shift_bucket"].max()),
+                "max_shift_duration": max_shift_duration,
+            }
+    _player_decay_disk_path(season).write_text(json.dumps(out))
+    logger.info(f"Saved player decay cache for {season}: {len(out)} players")
+    gc.collect()
+
+
+## disk-backed pre-computed player stints {season: {player_id: [stints]}}
+_PLAYER_STINTS_DISK: dict[str, dict[int, list]] = {}
+
+
+def _player_stints_disk_path(season: str) -> Path:
+    return cfg.paths.cache / f"player_stints_{season}.json"
+
+
+def _load_player_stints_disk(season: str) -> dict[int, list]:
+    if season in _PLAYER_STINTS_DISK:
+        return _PLAYER_STINTS_DISK[season]
+    path = _player_stints_disk_path(season)
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text())
+            _PLAYER_STINTS_DISK[season] = {int(k): v for k, v in raw.items()}
+            return _PLAYER_STINTS_DISK[season]
+        except Exception:
+            pass
+    return {}
+
+
+def precompute_player_stints_all(season: str) -> None:
+    import gc
+    meta = _get_stint_meta(season)
+    all_pids = meta["player_id"].unique().tolist()
+    out: dict[str, list] = {}
+
+    for pid in all_pids:
+        subset = meta[meta["player_id"] == pid].sort_values(
+            ["game_id", "period", "start_sec"]
+        ).reset_index(drop=True)
+        if subset.empty:
+            out[str(pid)] = []
+            continue
+
+        subset = subset.copy()
+        subset["end_sec"] = subset["start_sec"] + subset["duration"]
+        prev_end    = subset["end_sec"].shift(1)
+        prev_game   = subset["game_id"].shift(1)
+        prev_period = subset["period"].shift(1)
+        is_new = (
+            (subset["game_id"]   != prev_game)   |
+            (subset["period"]    != prev_period)  |
+            ((subset["start_sec"] - prev_end) > SHIFT_GAP_TOLERANCE)
+        )
+        is_new.iloc[0] = True
+        subset["shift_id"] = is_new.cumsum().astype(int)
+
+        def first_zone(zones):
+            for z in zones:
+                if str(z) in ("O", "N", "D"):
+                    return str(z)
+            return "N"
+
+        agg = (
+            subset.groupby("shift_id", sort=False)
+            .agg(
+                game_id   =("game_id",    "first"),
+                game_date =("game_date",  "first"),
+                home_team =("home_team",  "first"),
+                away_team =("away_team",  "first"),
+                is_home   =("is_home",    "first"),
+                period    =("period",     "first"),
+                start_sec =("start_sec",  "first"),
+                end_sec   =("end_sec",    "last"),
+                score     =("score_state","first"),
+                p_xgf     =("p_xgf",      "sum"),
+                p_xga     =("p_xga",      "sum"),
+                n_segs    =("duration",   "count"),
+                zones     =("zone_start", list),
+            )
+            .reset_index(drop=True)
+        )
+        agg["duration"] = agg["end_sec"] - agg["start_sec"]
+        agg["zone"] = agg["zones"].apply(first_zone)
+        agg["xgd"]  = agg["p_xgf"] - agg["p_xga"]
+
+        records = []
+        for _, r in agg.iterrows():
+            game_date = str(r.get("game_date", "") or "")
+            home_team = str(r.get("home_team", "?") or "?")
+            away_team = str(r.get("away_team", "?") or "?")
+            is_home_val = r.get("is_home")
+            is_home = None if is_home_val is None or is_home_val != is_home_val else bool(is_home_val)
+            records.append({
+                "game_id":   int(r["game_id"]),
+                "game_date": game_date,
+                "home_team": home_team,
+                "away_team": away_team,
+                "game_label": _format_game_label(int(r["game_id"]), game_date, home_team, away_team, is_home),
+                "period":    int(r["period"]),
+                "start_sec": int(r["start_sec"]),
+                "duration":  int(r["duration"]),
+                "zone":      r["zone"],
+                "score":     int(r["score"]) if r["score"] == r["score"] else 0,
+                "xgf":       round(float(r["p_xgf"]), 4),
+                "xga":       round(float(r["p_xga"]), 4),
+                "xgd":       round(float(r["xgd"]),   4),
+                "n_segs":    int(r["n_segs"]),
+            })
+        out[str(pid)] = records
+
+    _player_stints_disk_path(season).write_text(json.dumps(out))
+    logger.info(f"Saved player stints cache for {season}: {len(out)} players")
+    gc.collect()
 
 
 def _get_stint_meta(season: str) -> "pd.DataFrame":
@@ -554,6 +733,9 @@ def _get_stint_meta(season: str) -> "pd.DataFrame":
 
     if season in _STINT_META_CACHE:
         return _STINT_META_CACHE[season]
+
+    if len(_STINT_META_CACHE) >= _STINT_META_CACHE_MAX:
+        del _STINT_META_CACHE[next(iter(_STINT_META_CACHE))]
 
     df = load_stints(season)
     ev = df[df["strength"] == "5v5"].copy()
@@ -764,6 +946,11 @@ async def player_stints(player_id: int, season: str | None = None):
     if season is None:
         season = available[-1] if available else (cfg.seasons[-1] if cfg.seasons else "20232024")
     try:
+        disk = _load_player_stints_disk(season)
+        if player_id in disk:
+            records = disk[player_id]
+            return JSONResponse({"stints": records, "total": len(records)})
+
         meta   = _get_stint_meta(season)
         subset = meta[meta["player_id"] == player_id].sort_values(
             ["game_id", "period", "start_sec"]

@@ -18,7 +18,7 @@ from loguru import logger
 from config.settings import cfg
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=1)
 def load_stints(season: str) -> pd.DataFrame:
     path = cfg.paths.processed / f"stints_{season}.parquet"
     if not path.exists():
